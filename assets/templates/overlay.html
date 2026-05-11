@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bambu Overlay</title>
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/{{ view_mode }}.css">
+</head>
+<body>
+  <main class="overlay view-{{ view_mode }}">
+    <section class="inner" aria-live="polite">
+      <div id="thumbSlot" class="thumb is-empty">3D</div>
+      <div class="print-info">
+        <div id="title" class="title">Loading current print</div>
+        <div id="fileLine" class="info-line split-line">
+          <span id="fileName" class="split-main">--</span>
+          <span class="split-meta">
+            <span id="timeEstimate" class="split-meta-value"></span>
+            <span id="printWeight" class="split-meta-value"></span>
+          </span>
+        </div>
+        <div id="progressLine" class="info-line progress-line split-line">
+          <span id="progressPercent" class="split-main">--%</span>
+          <span class="split-meta">
+            <span id="layerInfo" class="split-meta-value">Layer -- / --</span>
+            <span id="remainingTime" class="split-meta-value">--</span>
+          </span>
+        </div>
+        <div class="progress-wrap">
+          <div id="progress" class="progress"></div>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric" aria-label="Toolhead temperature">
+          <span class="metric-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M9 3h6v7l3 3v4H6v-4l3-3Z"/><path d="M9 21h6"/><path d="M12 17v4"/></svg>
+          </span>
+          <div id="toolheadTemp" class="metric-value">--</div>
+        </div>
+        <div class="metric" aria-label="Heated bed temperature">
+          <span class="metric-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 14h16v5H4Z"/><path d="M7 10c1-1 1-2 0-3"/><path d="M12 10c1-1 1-2 0-3"/><path d="M17 10c1-1 1-2 0-3"/></svg>
+          </span>
+          <div id="bedTemp" class="metric-value">--</div>
+        </div>
+        <div class="metric" aria-label="Fan speed">
+          <span class="metric-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M12 4c3 0 4 3 2 5"/><path d="M20 12c0 3-3 4-5 2"/><path d="M12 20c-3 0-4-3-2-5"/><path d="M4 12c0-3 3-4 5-2"/></svg>
+          </span>
+          <div id="fanSpeed" class="metric-value">--</div>
+        </div>
+        <div class="metric" aria-label="Printing mode">
+          <span class="metric-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 1 1 16 0"/><path d="M12 14l4-4"/><path d="M12 14h.01"/><path d="M6.3 19h11.4"/></svg>
+          </span>
+          <div id="printMode" class="metric-value">--</div>
+        </div>
+      </div>
+      <div class="spools">
+        <div id="spoolList" class="spool-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script id="overlay-config" type="application/json">{{ config_json | safe }}</script>
+  <script src="/static/overlay.js"></script>
+</body>
+</html>

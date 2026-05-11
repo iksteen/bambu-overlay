@@ -1,0 +1,26 @@
+[Unit]
+Description=Bambu OBS overlay
+Documentation=https://github.com/iksteen/bambu-overlay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bambu-overlay
+Group=bambu-overlay
+ExecStart=/usr/local/bin/bambu-overlay serve --host 0.0.0.0 --port 8765 --token-file /var/lib/bambu-overlay/token.json
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+# StateDirectory creates /var/lib/bambu-overlay on supported systemd versions
+# and assigns it to User/Group. Keep ReadWritePaths aligned with --token-file.
+ReadWritePaths=/var/lib/bambu-overlay
+StateDirectory=bambu-overlay
+
+[Install]
+WantedBy=multi-user.target

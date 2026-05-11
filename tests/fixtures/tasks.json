@@ -1,0 +1,27 @@
+{
+  "hits": [
+    {
+      "amsDetailMapping": [],
+      "amsMapping": [],
+      "amsMapping2": [],
+      "bedType": "textured_plate",
+      "costTime": 3600,
+      "cover": "https://example.invalid/thumb.png",
+      "designId": "design-1",
+      "designTitle": "Calibration cube design",
+      "designTitleTranslated": "Calibration cube translated",
+      "deviceId": "printer-a",
+      "deviceModel": "X1 Carbon",
+      "deviceName": "Office X1",
+      "endTime": "2026-05-11T01:00:00Z",
+      "id": "task-1",
+      "plateIndex": 2,
+      "plateName": "Plate 2",
+      "startTime": "2026-05-11T00:00:00Z",
+      "status": "running",
+      "title": "Calibration cube",
+      "weight": 12.5
+    }
+  ],
+  "total": 1
+}

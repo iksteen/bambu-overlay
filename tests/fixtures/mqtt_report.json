@@ -1,0 +1,38 @@
+{
+  "print": {
+    "ams": {
+      "ams": [
+        {
+          "id": 0,
+          "tray": [
+            {
+              "id": 0,
+              "tray_color": "ff0000ff",
+              "tray_type": "PLA"
+            }
+          ]
+        }
+      ]
+    },
+    "bed_temper": 60,
+    "cooling_fan_speed": 40,
+    "cost_time": 3600,
+    "gcode_file": "calibration_cube.3mf",
+    "gcode_start_time": "2026-05-11T00:00:00Z",
+    "gcode_state": "RUNNING",
+    "layer_num": 4,
+    "mc_percent": 25,
+    "mc_remaining_time": 45,
+    "nozzle_temper": 220,
+    "spd_lvl": 2,
+    "subtask_id": "task-1",
+    "subtask_name": "Calibration cube",
+    "total_layer_num": 20,
+    "vt_tray": {
+      "id": 255,
+      "tray_color": "336699ff",
+      "tray_type": "PETG"
+    },
+    "weight": "12.5"
+  }
+}

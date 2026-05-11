@@ -1,0 +1,15 @@
+{
+  "code": null,
+  "message": "success",
+  "error": null,
+  "devices": [
+    {
+      "dev_access_code": "redacted",
+      "dev_id": "printer-a",
+      "dev_model_name": "BL-P001",
+      "dev_name": "Office X1",
+      "dev_online": true,
+      "dev_product_name": "X1 Carbon"
+    }
+  ]
+}
