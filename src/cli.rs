@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::{
     auth::{load_token, save_token},
     bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST, MQTT_PORT},
+    video::{VideoConfig, DEFAULT_VIDEO_PORT},
     web::{
         serve, ServerConfig, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_REFRESH_SECONDS,
         DEFAULT_TASK_LIMIT,
@@ -75,6 +76,10 @@ struct ServeArgs {
     mqtt_port: u16,
     #[arg(long)]
     no_mqtt: bool,
+    #[arg(long)]
+    video_host: Option<String>,
+    #[arg(long, default_value_t = DEFAULT_VIDEO_PORT)]
+    video_port: u16,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -156,6 +161,10 @@ impl From<&ServeArgs> for ServerConfig {
             mqtt_host: args.mqtt_host.clone(),
             mqtt_port: args.mqtt_port,
             no_mqtt: args.no_mqtt,
+            video: VideoConfig {
+                host: args.video_host.clone(),
+                port: args.video_port,
+            },
         }
     }
 }

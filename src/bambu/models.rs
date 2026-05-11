@@ -41,6 +41,12 @@ pub struct CloudDevice {
     pub product_name: Option<String>,
     #[serde(default, rename = "dev_online")]
     pub online: Option<bool>,
+    #[serde(
+        default,
+        rename = "dev_access_code",
+        deserialize_with = "de::optional_string"
+    )]
+    pub access_code: Option<String>,
     #[serde(default, rename = "print")]
     pub status: PrinterStatus,
 }

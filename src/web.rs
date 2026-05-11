@@ -3,6 +3,7 @@ use std::{convert::Infallible, net::SocketAddr, time::Duration};
 use anyhow::{Context, Result};
 use async_stream::stream;
 use axum::{
+    body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::{
@@ -22,6 +23,7 @@ use crate::{
     bambu::{BambuClient, MQTT_HOST, MQTT_PORT},
     mqtt::{initial_device_ids, supervise, MqttRuntime},
     overlay::{error_payload, SnapshotService},
+    video::{mjpeg_content_type, VideoConfig, VideoRuntime},
 };
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -38,6 +40,7 @@ pub struct ServerConfig {
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub no_mqtt: bool,
+    pub video: VideoConfig,
 }
 
 impl Default for ServerConfig {
@@ -50,6 +53,7 @@ impl Default for ServerConfig {
             mqtt_host: MQTT_HOST.to_owned(),
             mqtt_port: MQTT_PORT,
             no_mqtt: false,
+            video: VideoConfig::default(),
         }
     }
 }
@@ -58,6 +62,7 @@ impl Default for ServerConfig {
 struct AppState {
     snapshot: SnapshotService,
     mqtt: MqttRuntime,
+    video: VideoRuntime,
 }
 
 pub async fn serve(client: BambuClient, access_token: String, config: ServerConfig) -> Result<()> {
@@ -69,6 +74,7 @@ pub async fn serve(client: BambuClient, access_token: String, config: ServerConf
         Duration::from_secs_f64(config.refresh_seconds),
         mqtt.clone(),
     );
+    let video = VideoRuntime::new(client.clone(), access_token.clone(), config.video.clone())?;
 
     if config.no_mqtt {
         mqtt.set_disabled("disabled by --no-mqtt").await;
@@ -121,13 +127,18 @@ pub async fn serve(client: BambuClient, access_token: String, config: ServerConf
         }
     }
 
-    let state = AppState { snapshot, mqtt };
+    let state = AppState {
+        snapshot,
+        mqtt,
+        video,
+    };
     let app = Router::new()
         .route("/", get(horizontal_overlay))
         .route("/overlay", get(horizontal_overlay))
         .route("/vertical", get(vertical_overlay))
         .route("/api/current-print", get(current_print))
         .route("/api/current-print/events", get(current_print_events))
+        .route("/api/video.mjpeg", get(video_mjpeg))
         .route("/static/{file}", get(static_asset))
         .with_state(state);
 
@@ -195,6 +206,43 @@ async fn current_print_event(state: &AppState) -> Event {
     .unwrap_or_else(|error| json!({"ok": false, "error": error.to_string()}).to_string());
 
     Event::default().event("current-print").data(payload)
+}
+
+async fn video_mjpeg(State(state): State<AppState>) -> Response {
+    let subscription = match state.video.subscribe().await {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                error.to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let stream = stream! {
+        let mut subscription = subscription;
+        loop {
+            match subscription.recv().await {
+                Ok(part) => yield Ok::<bytes::Bytes, Infallible>(part),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "MJPEG video client lagged behind");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, mjpeg_content_type()),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (header::PRAGMA, "no-cache".to_owned()),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 async fn static_asset(Path(file): Path<String>) -> Response {
