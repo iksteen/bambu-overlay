@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt,
+    str,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -16,19 +16,12 @@ use tokio::{
     sync::{broadcast, Mutex, Notify},
     task::JoinHandle,
 };
-use tokio_rustls::{
-    rustls::{
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        crypto::ring,
-        pki_types::{CertificateDer, ServerName, UnixTime},
-        ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
-    },
-    TlsConnector,
-};
+use tokio_native_tls::TlsConnector;
 use tracing::{info, warn};
 
 use crate::{
     bambu::{BambuClient, CloudDevice},
+    device_tls,
     devices::DeviceRegistry,
 };
 
@@ -116,7 +109,7 @@ impl VideoRuntime {
         config: VideoConfig,
         devices: DeviceRegistry,
     ) -> Result<Self> {
-        let tls = bambu_tls_connector()?;
+        let tls = device_tls::tokio_connector()?;
         Ok(Self {
             inner: Arc::new(VideoRuntimeInner {
                 client,
@@ -263,17 +256,20 @@ async fn stream_host_once(
         .with_context(|| format!("timed out connecting to video server at {address}"))?
         .with_context(|| format!("failed to connect to video server at {address}"))?;
 
-    let server_name = ServerName::try_from(session.device_id.clone()).with_context(|| {
-        format!(
-            "invalid printer device id `{}` for TLS SNI",
-            session.device_id
-        )
-    })?;
     let mut socket = inner
         .tls
-        .connect(server_name, tcp)
+        .connect(&session.device_id, tcp)
         .await
         .with_context(|| format!("failed TLS handshake with video server at {address}"))?;
+    let certificate_device_id = device_tls::peer_device_id(&socket)
+        .context("video server certificate did not include a usable common name")?;
+    if certificate_device_id != session.device_id {
+        remember_host(inner, &certificate_device_id, host).await;
+        bail!(
+            "video host certificate is for device `{certificate_device_id}`, not requested device `{}`",
+            session.device_id
+        );
+    }
 
     socket
         .write_all(&auth_packet(&session.access_code)?)
@@ -483,81 +479,12 @@ fn error_chain(error: &anyhow::Error) -> String {
         .join(": ")
 }
 
-fn bambu_tls_connector() -> Result<TlsConnector> {
-    let supported_schemes = ring::default_provider()
-        .signature_verification_algorithms
-        .supported_schemes();
-    let verifier = Arc::new(BambuCertificateVerifier { supported_schemes });
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    Ok(TlsConnector::from(Arc::new(config)))
-}
-
-struct BambuCertificateVerifier {
-    supported_schemes: Vec<SignatureScheme>,
-}
-
-impl fmt::Debug for BambuCertificateVerifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("BambuCertificateVerifier")
-            .field("supported_schemes", &self.supported_schemes)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ServerCertVerifier for BambuCertificateVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> Result<ServerCertVerified, RustlsError> {
-        // Bambu printer certificates are not consistently accepted by rustls/WebPKI:
-        // they are CN-only, and at least some firmware serves certificates with a
-        // version shape WebPKI rejects as UnsupportedCertVersion. Still send the
-        // printer serial as SNI so the printer selects the expected certificate, but
-        // do not rely on WebPKI parsing for this local-only video transport.
-        let _ = (end_entity, intermediates, now);
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        let _ = (message, cert, dss);
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        let _ = (message, cert, dss);
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported_schemes.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::{
-        auth_packet, bambu_tls_connector, is_jpeg, mjpeg_part, order_hosts, select_session,
-        video_hosts, VideoConfig,
+        auth_packet, is_jpeg, mjpeg_part, order_hosts, select_session, video_hosts, VideoConfig,
     };
     use crate::bambu::CloudDevice;
 
@@ -687,10 +614,5 @@ mod tests {
         assert!(is_jpeg(&[0xff, 0xd8, 0x00, 0xff, 0xd9]));
         assert!(!is_jpeg(&[0xff, 0xd8, 0x00]));
         assert!(!is_jpeg(&[0x00, 0xff, 0xd9]));
-    }
-
-    #[test]
-    fn bambu_tls_connector_builds_with_supported_signature_schemes() {
-        bambu_tls_connector().expect("Bambu TLS connector should build");
     }
 }

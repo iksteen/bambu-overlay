@@ -2,6 +2,7 @@ pub mod assets;
 pub mod auth;
 pub mod bambu;
 pub mod cli;
+pub(crate) mod device_tls;
 pub mod devices;
 pub mod mqtt;
 pub mod overlay;

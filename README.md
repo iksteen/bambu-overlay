@@ -12,6 +12,10 @@ files are needed next to the binary.
 cargo build --release
 ```
 
+On Linux, the video TLS transport uses `native-tls`, which links against
+OpenSSL. Install the OpenSSL development package for your build target, for
+example `pkg-config` and `libssl-dev` on Debian/Ubuntu.
+
 Deploy:
 
 ```sh
@@ -84,13 +88,18 @@ field in the current-print response and is not stored by `bambu-overlay`.
 Select a camera with `/api/video.mjpeg?device=<DEVICE_ID>`. Without `device`,
 the first printer from the process-stable device list is used. For each selected
 device, `bambu-overlay` tries the configured video hosts with that device ID as
-TLS SNI and remembers the host that successfully streams frames for the rest of
-the process.
+TLS SNI. The printer certificate common name is the device serial number, so
+`bambu-overlay` uses the certificate to reject mismatched hosts before sending
+the camera access code. It also remembers mismatched host/device pairs it
+discovers while probing, then remembers the host that successfully streams
+frames for the rest of the process.
 
-Bambu printer TLS certificates are not always accepted by strict Rust TLS
-validation, so the video connection uses TLS with printer SNI but does not
-enforce WebPKI certificate validation. Keep the MJPEG endpoint on a trusted
-network.
+The video connection uses `native-tls` with only Bambu's BBL CA certificate
+trusted for this transport. The TLS backend verifies the certificate chain,
+certificate validity, signatures, and handshake. Hostname verification is
+disabled because some printer firmware serves CN-only certificates; after the
+TLS handshake, `bambu-overlay` checks that the certificate common name matches
+the requested device ID before sending the camera access code.
 
 Only one upstream video connection to the printer is opened. Multiple OBS or
 browser clients connected to the same `/api/video.mjpeg?device=<DEVICE_ID>`
