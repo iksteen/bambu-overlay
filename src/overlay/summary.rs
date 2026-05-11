@@ -136,12 +136,14 @@ impl<'a> DeviceFields<'a> {
     fn ams(&self) -> Option<&AmsState> {
         self.report
             .and_then(|print| print.ams.as_ref())
+            .filter(|ams| ams.has_spool_data())
             .or(self.cloud_print().ams.as_ref())
     }
 
     fn external_tray(&self) -> Option<&Tray> {
         self.report
             .and_then(|print| print.external_tray.as_ref())
+            .filter(|tray| tray.has_spool_data())
             .or(self.cloud_print().external_tray.as_ref())
     }
 
@@ -608,6 +610,58 @@ mod tests {
         assert_eq!(devices[0].toolhead_temp.as_deref(), Some("210C"));
         assert_eq!(devices[0].bed_temp.as_deref(), Some("60C"));
         assert_eq!(devices[1].progress, Some(1.0));
+    }
+
+    #[test]
+    fn summarize_devices_keeps_cloud_spools_when_mqtt_report_is_empty() {
+        let print: CurrentPrintResponse = decode(json!({
+            "devices": [
+                {
+                    "dev_id": "printer-a",
+                    "print": {
+                        "mc_percent": 12,
+                        "ams": {
+                            "ams": [
+                                {
+                                    "id": 0,
+                                    "tray": [
+                                        {
+                                            "id": 0,
+                                            "tray_type": "PLA",
+                                            "tray_color": "ff0000ff"
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        "vt_tray": {
+                            "id": 255,
+                            "tray_type": "PETG",
+                            "tray_color": "336699ff"
+                        }
+                    }
+                }
+            ]
+        }));
+        let tasks = TasksResponse::default();
+        let reports = HashMap::from([(
+            "printer-a".to_owned(),
+            decode(json!({
+                "mc_percent": 42,
+                "ams": {"ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
+                "vt_tray": {"id": 255, "tray_color": "00000000"}
+            })),
+        )]);
+
+        let summaries = summarize_devices(&print, &tasks, &reports);
+        let device = overlay_device(summaries.into_iter().next().unwrap());
+
+        assert_eq!(device.progress, Some(42.0));
+        assert_eq!(device.ams_spools.len(), 1);
+        assert_eq!(device.ams_spools[0].material, "PLA");
+        assert_eq!(device.ams_spools[0].color, "#FF0000");
+        assert_eq!(device.external_spool.as_ref().unwrap().material, "PETG");
+        assert_eq!(device.external_spool.as_ref().unwrap().color, "#336699");
     }
 
     #[test]

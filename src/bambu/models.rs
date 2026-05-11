@@ -142,10 +142,10 @@ impl PrinterStatus {
             toolhead_temperature,
             bed_temperature,
             fan_speed,
-            ams,
-            external_tray,
             speed_level,
         );
+        merge_ams(&mut self.ams, patch.ams);
+        merge_tray(&mut self.external_tray, patch.external_tray);
     }
 }
 
@@ -153,6 +153,15 @@ impl PrinterStatus {
 pub struct AmsState {
     #[serde(default)]
     pub ams: Vec<AmsUnit>,
+}
+
+impl AmsState {
+    pub fn has_spool_data(&self) -> bool {
+        self.ams
+            .iter()
+            .flat_map(|unit| &unit.tray)
+            .any(Tray::has_spool_data)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -199,6 +208,17 @@ pub struct Tray {
     pub color: Option<String>,
     #[serde(default)]
     pub cols: Vec<String>,
+}
+
+impl Tray {
+    pub fn has_spool_data(&self) -> bool {
+        self.material.as_deref().is_some_and(has_text)
+            || self.display_name.as_deref().is_some_and(has_text)
+            || self.sub_brand.as_deref().is_some_and(has_text)
+            || self.info_index.as_deref().is_some_and(has_text)
+            || self.color.as_deref().is_some_and(has_visible_color)
+            || self.cols.iter().any(|color| has_visible_color(color))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -307,6 +327,30 @@ fn merge_option<T>(target: &mut Option<T>, patch: Option<T>) {
     }
 }
 
+fn merge_ams(target: &mut Option<AmsState>, patch: Option<AmsState>) {
+    if patch.as_ref().is_some_and(AmsState::has_spool_data) || target.is_none() {
+        merge_option(target, patch);
+    }
+}
+
+fn merge_tray(target: &mut Option<Tray>, patch: Option<Tray>) {
+    if patch.as_ref().is_some_and(Tray::has_spool_data) || target.is_none() {
+        merge_option(target, patch);
+    }
+}
+
+fn has_text(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn has_visible_color(value: &str) -> bool {
+    let normalized = value.trim().trim_start_matches('#');
+    if normalized.len() < 6 {
+        return false;
+    }
+    !(normalized[..6].eq_ignore_ascii_case("000000") && normalized.get(6..8) == Some("00"))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -370,5 +414,31 @@ mod tests {
         base.merge(patch.clone());
 
         assert_eq!(base, patch);
+    }
+
+    #[test]
+    fn printer_status_merge_keeps_spools_when_patch_has_no_spool_data() {
+        let mut status: PrinterStatus = serde_json::from_value(json!({
+            "mc_percent": 10,
+            "ams": {"ams": [{"id": 0, "tray": [{"id": 0, "tray_type": "PLA", "tray_color": "ff0000ff"}]}]},
+            "vt_tray": {"id": 255, "tray_type": "PETG", "tray_color": "336699ff"}
+        }))
+        .unwrap();
+        let patch: PrinterStatus = serde_json::from_value(json!({
+            "mc_percent": 20,
+            "ams": {"ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
+            "vt_tray": {"id": 255, "tray_color": "00000000"}
+        }))
+        .unwrap();
+
+        status.merge(patch);
+
+        assert_eq!(status.progress, Some(20.0));
+        let tray = &status.ams.as_ref().unwrap().ams[0].tray[0];
+        assert_eq!(tray.material.as_deref(), Some("PLA"));
+        assert_eq!(tray.color.as_deref(), Some("ff0000ff"));
+        let external = status.external_tray.as_ref().unwrap();
+        assert_eq!(external.material.as_deref(), Some("PETG"));
+        assert_eq!(external.color.as_deref(), Some("336699ff"));
     }
 }
