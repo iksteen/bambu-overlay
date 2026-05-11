@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     bambu::{BambuClient, CurrentPrintResponse, TasksResponse},
+    devices::DeviceRegistry,
     mqtt::{MqttRuntime, MqttStatusPayload},
 };
 
@@ -22,6 +23,7 @@ pub struct SnapshotService {
     task_limit: usize,
     cloud_refresh: Duration,
     mqtt: MqttRuntime,
+    devices: DeviceRegistry,
     cache: Arc<Mutex<CloudCache>>,
     refresh: Arc<Mutex<()>>,
 }
@@ -59,6 +61,7 @@ impl SnapshotService {
         task_limit: usize,
         cloud_refresh: Duration,
         mqtt: MqttRuntime,
+        devices: DeviceRegistry,
     ) -> Self {
         Self {
             client,
@@ -66,6 +69,7 @@ impl SnapshotService {
             task_limit,
             cloud_refresh,
             mqtt,
+            devices,
             cache: Arc::new(Mutex::new(CloudCache::default())),
             refresh: Arc::new(Mutex::new(())),
         }
@@ -101,7 +105,8 @@ impl SnapshotService {
             return Ok(cached);
         }
 
-        let current = self.client.current_print(&self.access_token).await?;
+        let mut current = self.client.current_print(&self.access_token).await?;
+        current.devices = self.devices.order_cloud_devices(current.devices).await;
         let tasks = self
             .client
             .tasks(&self.access_token, self.task_limit, None)

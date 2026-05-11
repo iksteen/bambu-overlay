@@ -7,7 +7,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::bambu::{BambuClient, PrinterStatus};
+use crate::{
+    bambu::{BambuClient, PrinterStatus},
+    devices::DeviceRegistry,
+};
 
 const KEEPALIVE: Duration = Duration::from_secs(60);
 
@@ -134,8 +137,13 @@ impl Default for MqttRuntime {
     }
 }
 
-pub async fn initial_device_ids(client: &BambuClient, access_token: &str) -> Result<Vec<String>> {
-    let current_print = client.current_print(access_token).await?;
+pub async fn initial_device_ids(
+    client: &BambuClient,
+    access_token: &str,
+    devices: &DeviceRegistry,
+) -> Result<Vec<String>> {
+    let mut current_print = client.current_print(access_token).await?;
+    current_print.devices = devices.order_cloud_devices(current_print.devices).await;
     Ok(current_print
         .devices
         .into_iter()

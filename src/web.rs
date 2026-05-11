@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use async_stream::stream;
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -14,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use minijinja::{context, Environment};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -21,6 +22,7 @@ use tracing::{error, info, warn};
 use crate::{
     assets,
     bambu::{BambuClient, MQTT_HOST, MQTT_PORT},
+    devices::DeviceRegistry,
     mqtt::{initial_device_ids, supervise, MqttRuntime},
     overlay::{error_payload, SnapshotService},
     video::{mjpeg_content_type, VideoConfig, VideoRuntime},
@@ -65,21 +67,33 @@ struct AppState {
     video: VideoRuntime,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeviceQuery {
+    device: Option<String>,
+}
+
 pub async fn serve(client: BambuClient, access_token: String, config: ServerConfig) -> Result<()> {
     let mqtt = MqttRuntime::new();
+    let devices = DeviceRegistry::new();
     let snapshot = SnapshotService::new(
         client.clone(),
         access_token.clone(),
         config.task_limit,
         Duration::from_secs_f64(config.refresh_seconds),
         mqtt.clone(),
+        devices.clone(),
     );
-    let video = VideoRuntime::new(client.clone(), access_token.clone(), config.video.clone())?;
+    let video = VideoRuntime::new(
+        client.clone(),
+        access_token.clone(),
+        config.video.clone(),
+        devices.clone(),
+    )?;
 
     if config.no_mqtt {
         mqtt.set_disabled("disabled by --no-mqtt").await;
     } else {
-        let device_ids = match initial_device_ids(&client, &access_token).await {
+        let device_ids = match initial_device_ids(&client, &access_token, &devices).await {
             Ok(ids) => ids,
             Err(error) => {
                 warn!(%error, "could not bootstrap MQTT device ids from HTTP");
@@ -208,8 +222,8 @@ async fn current_print_event(state: &AppState) -> Event {
     Event::default().event("current-print").data(payload)
 }
 
-async fn video_mjpeg(State(state): State<AppState>) -> Response {
-    let subscription = match state.video.subscribe().await {
+async fn video_mjpeg(State(state): State<AppState>, Query(query): Query<DeviceQuery>) -> Response {
+    let subscription = match state.video.subscribe(query.device.as_deref()).await {
         Ok(subscription) => subscription,
         Err(error) => {
             return (

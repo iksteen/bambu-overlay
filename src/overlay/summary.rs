@@ -35,6 +35,7 @@ enum TaskSource {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DeviceSummary {
+    id: Option<String>,
     name: String,
     model_name: Option<String>,
     product_name: Option<String>,
@@ -66,6 +67,7 @@ pub(super) struct DeviceSummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct OverlayDevice {
+    id: Option<String>,
     name: String,
     model: String,
     online: bool,
@@ -219,6 +221,7 @@ impl<'a> DeviceFields<'a> {
         );
 
         let summary = DeviceSummary {
+            id: device_id.clone(),
             name: self
                 .device
                 .name
@@ -365,9 +368,13 @@ fn summarize_device(
     if let Some(history_task) = task_match {
         if !summary.is_printing {
             summary = TaskRecord::new(&history_task.task).summary(history_task.active);
+            summary.id = device_id.clone();
         } else {
             fill_missing_from_task(&mut summary, &history_task.task);
         }
+    }
+    if summary.id.is_none() {
+        summary.id = device_id;
     }
     summary
 }
@@ -380,6 +387,7 @@ pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {
         progress_source = "estimated";
     }
     OverlayDevice {
+        id: device.id,
         name: device.name,
         model: device
             .product_name

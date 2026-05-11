@@ -35,6 +35,18 @@ bambu-overlay serve
 Open `http://127.0.0.1:8765/` for the horizontal overlay or
 `http://127.0.0.1:8765/vertical` for the vertical overlay.
 
+When the token account has more than one printer, list the available device IDs:
+
+```sh
+bambu-overlay devices
+```
+
+Select a printer in the overlay with the `device` query argument:
+`http://127.0.0.1:8765/?device=<DEVICE_ID>` or
+`http://127.0.0.1:8765/vertical?device=<DEVICE_ID>`. If the argument is
+missing or does not match a returned printer, the overlay uses the first printer
+from the process-stable device list.
+
 The browser uses server-sent events from `/api/current-print/events`. The server
 emits after MQTT messages and at least once per second. `--refresh-seconds`
 controls how often the slower Bambu Cloud HTTP data is refreshed.
@@ -45,13 +57,14 @@ Useful commands:
 bambu-overlay serve --host 0.0.0.0 --port 8765
 bambu-overlay serve --no-mqtt
 bambu-overlay serve --video-host 192.168.1.50
+bambu-overlay serve --video-host 192.168.1.50 --video-host 192.168.1.51
 ```
 
 Configuration is handled with command-line options. Use `--help` on any command
 to see the available options. `serve` reads the access token and API base from
 the token file and only exposes runtime settings such as `--token-file`,
 `--timeout`, `--refresh-seconds`, `--mqtt-host`, `--mqtt-port`, `--no-mqtt`,
-and `--video-host`.
+`--video-host`, and `--video-port`. `--video-host` can be repeated.
 
 ## Video
 
@@ -62,11 +75,17 @@ A1 and P1 series printers can expose their camera as MJPEG at
 bambu-overlay serve --video-host 192.168.1.50
 ```
 
-`--video-host` is the printer's LAN IP address or hostname. The printer video
-server uses port `6000` by default; override it with `--video-port` if needed.
-The LAN access code is fetched from Bambu Cloud on stream startup via the
-`dev_access_code` field in the current-print response and is not stored by
-`bambu-overlay`.
+`--video-host` is a printer LAN IP address or hostname. Repeat it once per
+printer when serving multiple cameras. The printer video server uses port
+`6000` by default; override it with `--video-port` if needed. The LAN access
+code is fetched from Bambu Cloud on stream startup via the `dev_access_code`
+field in the current-print response and is not stored by `bambu-overlay`.
+
+Select a camera with `/api/video.mjpeg?device=<DEVICE_ID>`. Without `device`,
+the first printer from the process-stable device list is used. For each selected
+device, `bambu-overlay` tries the configured video hosts with that device ID as
+TLS SNI and remembers the host that successfully streams frames for the rest of
+the process.
 
 Bambu printer TLS certificates are not always accepted by strict Rust TLS
 validation, so the video connection uses TLS with printer SNI but does not
@@ -74,11 +93,9 @@ enforce WebPKI certificate validation. Keep the MJPEG endpoint on a trusted
 network.
 
 Only one upstream video connection to the printer is opened. Multiple OBS or
-browser clients connected to `/api/video.mjpeg` share that connection, and the
-printer connection is closed after the last MJPEG client disconnects.
-
-Video streaming requires a token account with exactly one printer that reports
-`dev_access_code`.
+browser clients connected to the same `/api/video.mjpeg?device=<DEVICE_ID>`
+stream share that connection, and the printer connection is closed after the
+last MJPEG client disconnects.
 
 ## systemd
 

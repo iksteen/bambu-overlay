@@ -2,6 +2,7 @@
   const configScript = document.getElementById("overlay-config");
   const config = JSON.parse(configScript?.textContent || "{}");
   const eventsUrl = config.eventsUrl || "/api/current-print/events";
+  const selectedDeviceId = (new URLSearchParams(window.location.search).get("device") || "").trim();
   const state = {
     title: document.getElementById("title"),
     fileName: document.getElementById("fileName"),
@@ -24,7 +25,10 @@
   };
 
   function pickDevice(devices) {
-    return devices.find((device) => device.isPrinting) || devices[0] || null;
+    if (selectedDeviceId) {
+      return devices.find((device) => device.id === selectedDeviceId) || devices[0] || null;
+    }
+    return devices[0] || null;
   }
 
   function setText(node, value) {

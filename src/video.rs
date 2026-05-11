@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -26,7 +27,10 @@ use tokio_rustls::{
 };
 use tracing::{info, warn};
 
-use crate::bambu::{BambuClient, CloudDevice};
+use crate::{
+    bambu::{BambuClient, CloudDevice},
+    devices::DeviceRegistry,
+};
 
 pub const DEFAULT_VIDEO_PORT: u16 = 6000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,14 +42,14 @@ const MJPEG_BOUNDARY: &str = "frame";
 
 #[derive(Clone, Debug)]
 pub struct VideoConfig {
-    pub host: Option<String>,
+    pub hosts: Vec<String>,
     pub port: u16,
 }
 
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
-            host: None,
+            hosts: Vec::new(),
             port: DEFAULT_VIDEO_PORT,
         }
     }
@@ -53,14 +57,21 @@ impl Default for VideoConfig {
 
 #[derive(Clone)]
 pub struct VideoRuntime {
-    inner: Arc<VideoInner>,
+    inner: Arc<VideoRuntimeInner>,
 }
 
-struct VideoInner {
+struct VideoRuntimeInner {
     client: BambuClient,
     access_token: String,
     config: VideoConfig,
     tls: TlsConnector,
+    devices: DeviceRegistry,
+    streams: Mutex<HashMap<String, Arc<VideoStream>>>,
+    host_map: Mutex<HashMap<String, String>>,
+}
+
+struct VideoStream {
+    device_id: String,
     parts: broadcast::Sender<Bytes>,
     clients: AtomicUsize,
     no_clients: Notify,
@@ -73,7 +84,7 @@ pub struct VideoSubscription {
 }
 
 struct VideoClientGuard {
-    inner: Arc<VideoInner>,
+    stream: Arc<VideoStream>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,34 +110,39 @@ pub fn mjpeg_part(frame: &[u8]) -> Bytes {
 }
 
 impl VideoRuntime {
-    pub fn new(client: BambuClient, access_token: String, config: VideoConfig) -> Result<Self> {
+    pub fn new(
+        client: BambuClient,
+        access_token: String,
+        config: VideoConfig,
+        devices: DeviceRegistry,
+    ) -> Result<Self> {
         let tls = bambu_tls_connector()?;
-        let (parts, _) = broadcast::channel(4);
         Ok(Self {
-            inner: Arc::new(VideoInner {
+            inner: Arc::new(VideoRuntimeInner {
                 client,
                 access_token,
                 config,
                 tls,
-                parts,
-                clients: AtomicUsize::new(0),
-                no_clients: Notify::new(),
-                worker: Mutex::new(None),
+                devices,
+                streams: Mutex::new(HashMap::new()),
+                host_map: Mutex::new(HashMap::new()),
             }),
         })
     }
 
-    pub async fn subscribe(&self) -> Result<VideoSubscription> {
-        if self.video_host().is_none() {
-            bail!("video stream is disabled; set --video-host to the printer IP or hostname");
+    pub async fn subscribe(&self, device_id: Option<&str>) -> Result<VideoSubscription> {
+        if video_hosts(&self.inner.config).is_empty() {
+            bail!("video stream is disabled; set at least one --video-host");
         }
 
-        let receiver = self.inner.parts.subscribe();
-        self.inner.clients.fetch_add(1, Ordering::SeqCst);
+        let session = resolve_session(&self.inner, device_id).await?;
+        let stream = self.stream_for_device(&session.device_id).await;
+        let receiver = stream.parts.subscribe();
+        stream.clients.fetch_add(1, Ordering::SeqCst);
         let guard = VideoClientGuard {
-            inner: Arc::clone(&self.inner),
+            stream: Arc::clone(&stream),
         };
-        self.ensure_worker().await;
+        self.ensure_worker(stream).await;
 
         Ok(VideoSubscription {
             receiver,
@@ -134,23 +150,35 @@ impl VideoRuntime {
         })
     }
 
-    fn video_host(&self) -> Option<&str> {
-        self.inner
-            .config
-            .host
-            .as_deref()
-            .map(str::trim)
-            .filter(|host| !host.is_empty())
+    async fn stream_for_device(&self, device_id: &str) -> Arc<VideoStream> {
+        let mut streams = self.inner.streams.lock().await;
+        if let Some(stream) = streams.get(device_id) {
+            return Arc::clone(stream);
+        }
+
+        let (parts, _) = broadcast::channel(4);
+        let stream = Arc::new(VideoStream {
+            device_id: device_id.to_owned(),
+            parts,
+            clients: AtomicUsize::new(0),
+            no_clients: Notify::new(),
+            worker: Mutex::new(None),
+        });
+        streams.insert(device_id.to_owned(), Arc::clone(&stream));
+        stream
     }
 
-    async fn ensure_worker(&self) {
-        let mut worker = self.inner.worker.lock().await;
+    async fn ensure_worker(&self, stream: Arc<VideoStream>) {
+        let mut worker = stream.worker.lock().await;
         let should_start = match worker.as_ref() {
             Some(handle) => handle.is_finished(),
             None => true,
         };
         if should_start {
-            *worker = Some(tokio::spawn(run_worker(Arc::clone(&self.inner))));
+            *worker = Some(tokio::spawn(run_worker(
+                Arc::clone(&self.inner),
+                Arc::clone(&stream),
+            )));
         }
     }
 }
@@ -164,48 +192,73 @@ impl VideoSubscription {
 impl Drop for VideoClientGuard {
     fn drop(&mut self) {
         if let Ok(previous) =
-            self.inner
+            self.stream
                 .clients
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |clients| {
                     clients.checked_sub(1)
                 })
         {
             if previous == 1 {
-                self.inner.no_clients.notify_waiters();
+                self.stream.no_clients.notify_waiters();
             }
         }
     }
 }
 
-async fn run_worker(inner: Arc<VideoInner>) {
+async fn run_worker(inner: Arc<VideoRuntimeInner>, stream: Arc<VideoStream>) {
     let mut delay = RETRY_INITIAL_DELAY;
-    while inner.clients.load(Ordering::SeqCst) > 0 {
-        match stream_once(&inner).await {
+    while stream.clients.load(Ordering::SeqCst) > 0 {
+        match stream_once(&inner, &stream).await {
             Ok(()) => delay = RETRY_INITIAL_DELAY,
             Err(error) => {
-                if inner.clients.load(Ordering::SeqCst) == 0 {
+                if stream.clients.load(Ordering::SeqCst) == 0 {
                     break;
                 }
-                warn!(error = %error_chain(&error), "video stream disconnected");
-                sleep_or_no_clients(&inner, delay).await;
+                warn!(
+                    device_id = %stream.device_id,
+                    error = %error_chain(&error),
+                    "video stream disconnected"
+                );
+                sleep_or_no_clients(&stream, delay).await;
                 delay = (delay + delay / 2).min(RETRY_MAX_DELAY);
             }
         }
     }
 }
 
-async fn stream_once(inner: &VideoInner) -> Result<()> {
-    let session = resolve_session(inner).await?;
-    let host = inner
-        .config
-        .host
-        .as_deref()
-        .map(str::trim)
-        .filter(|host| !host.is_empty())
-        .context("video stream is disabled; set --video-host to the printer IP or hostname")?;
+async fn stream_once(inner: &VideoRuntimeInner, stream: &VideoStream) -> Result<()> {
+    let session = resolve_session(inner, Some(&stream.device_id)).await?;
+    let hosts = candidate_hosts(inner, &session.device_id).await;
+    let mut last_error = None;
+
+    for host in hosts {
+        match stream_host_once(inner, stream, &session, &host).await {
+            Ok(()) => return Ok(()),
+            Err(_) if stream.clients.load(Ordering::SeqCst) == 0 => return Ok(()),
+            Err(error) => {
+                warn!(
+                    device_id = %session.device_id,
+                    host = %host,
+                    error = %error_chain(&error),
+                    "video host failed"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no video hosts configured")))
+}
+
+async fn stream_host_once(
+    inner: &VideoRuntimeInner,
+    video: &VideoStream,
+    session: &VideoSession,
+    host: &str,
+) -> Result<()> {
     let address = format!("{host}:{}", inner.config.port);
 
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&address))
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&address))
         .await
         .with_context(|| format!("timed out connecting to video server at {address}"))?
         .with_context(|| format!("failed to connect to video server at {address}"))?;
@@ -216,17 +269,17 @@ async fn stream_once(inner: &VideoInner) -> Result<()> {
             session.device_id
         )
     })?;
-    let mut stream = inner
+    let mut socket = inner
         .tls
-        .connect(server_name, stream)
+        .connect(server_name, tcp)
         .await
         .with_context(|| format!("failed TLS handshake with video server at {address}"))?;
 
-    stream
+    socket
         .write_all(&auth_packet(&session.access_code)?)
         .await
         .context("failed to send video authentication packet")?;
-    stream
+    socket
         .flush()
         .await
         .context("failed to flush video authentication packet")?;
@@ -238,8 +291,8 @@ async fn stream_once(inner: &VideoInner) -> Result<()> {
     );
 
     let mut header = [0_u8; 16];
-    while inner.clients.load(Ordering::SeqCst) > 0 {
-        if !read_exact_with_timeout(inner, &mut stream, &mut header, "video frame header").await? {
+    while video.clients.load(Ordering::SeqCst) > 0 {
+        if !read_exact_with_timeout(video, &mut socket, &mut header, "video frame header").await? {
             break;
         }
         let frame_size = u32::from_le_bytes(header[0..4].try_into().expect("u32 slice")) as usize;
@@ -249,11 +302,12 @@ async fn stream_once(inner: &VideoInner) -> Result<()> {
         );
 
         let mut frame = vec![0_u8; frame_size];
-        if !read_exact_with_timeout(inner, &mut stream, &mut frame, "video frame").await? {
+        if !read_exact_with_timeout(video, &mut socket, &mut frame, "video frame").await? {
             break;
         }
         if is_jpeg(&frame) {
-            let _ = inner.parts.send(mjpeg_part(&frame));
+            remember_host(inner, &session.device_id, host).await;
+            let _ = video.parts.send(mjpeg_part(&frame));
         } else {
             warn!("discarding video frame without JPEG magic bytes");
         }
@@ -262,10 +316,10 @@ async fn stream_once(inner: &VideoInner) -> Result<()> {
     Ok(())
 }
 
-async fn sleep_or_no_clients(inner: &VideoInner, delay: Duration) {
-    let no_clients = inner.no_clients.notified();
+async fn sleep_or_no_clients(stream: &VideoStream, delay: Duration) {
+    let no_clients = stream.no_clients.notified();
     tokio::pin!(no_clients);
-    if inner.clients.load(Ordering::SeqCst) == 0 {
+    if stream.clients.load(Ordering::SeqCst) == 0 {
         return;
     }
     tokio::select! {
@@ -275,7 +329,7 @@ async fn sleep_or_no_clients(inner: &VideoInner, delay: Duration) {
 }
 
 async fn read_exact_with_timeout<S>(
-    inner: &VideoInner,
+    video: &VideoStream,
     stream: &mut S,
     buffer: &mut [u8],
     label: &str,
@@ -283,9 +337,9 @@ async fn read_exact_with_timeout<S>(
 where
     S: AsyncRead + Unpin,
 {
-    let no_clients = inner.no_clients.notified();
+    let no_clients = video.no_clients.notified();
     tokio::pin!(no_clients);
-    if inner.clients.load(Ordering::SeqCst) == 0 {
+    if video.clients.load(Ordering::SeqCst) == 0 {
         return Ok(false);
     }
 
@@ -300,26 +354,49 @@ where
     }
 }
 
-async fn resolve_session(inner: &VideoInner) -> Result<VideoSession> {
-    let current_print = inner
+async fn resolve_session(
+    inner: &VideoRuntimeInner,
+    requested_device_id: Option<&str>,
+) -> Result<VideoSession> {
+    let mut current_print = inner
         .client
         .current_print(&inner.access_token)
         .await
         .context("failed to fetch video access code from Bambu Cloud")?;
-    select_session(current_print.devices)
+    current_print.devices = inner
+        .devices
+        .order_cloud_devices(current_print.devices)
+        .await;
+    select_session(current_print.devices, requested_device_id)
 }
 
-fn select_session(devices: Vec<CloudDevice>) -> Result<VideoSession> {
-    let mut matches = devices
-        .into_iter()
-        .filter_map(video_session)
-        .collect::<Vec<_>>();
+fn select_session(
+    devices: Vec<CloudDevice>,
+    requested_device_id: Option<&str>,
+) -> Result<VideoSession> {
+    let requested_device_id = requested_device_id
+        .map(str::trim)
+        .filter(|device_id| !device_id.is_empty());
 
-    match matches.len() {
-        0 => bail!("no devices with dev_access_code were returned by Bambu Cloud"),
-        1 => Ok(matches.remove(0)),
-        _ => bail!("multiple devices have video access codes; video streaming requires exactly one printer in the token account"),
+    if let Some(requested_device_id) = requested_device_id {
+        let Some(device) = devices.into_iter().find(|device| {
+            device
+                .id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|device_id| device_id == requested_device_id)
+        }) else {
+            bail!("device `{requested_device_id}` was not returned by Bambu Cloud");
+        };
+        return video_session(device).with_context(|| {
+            format!("device `{requested_device_id}` did not include dev_access_code")
+        });
     }
+
+    let Some(device) = devices.into_iter().next() else {
+        bail!("no devices were returned by Bambu Cloud");
+    };
+    video_session(device).context("first device did not include dev_access_code")
 }
 
 fn video_session(device: CloudDevice) -> Option<VideoSession> {
@@ -358,6 +435,44 @@ fn write_auth_field(target: &mut [u8], value: &str, label: &str) -> Result<()> {
 
 fn is_jpeg(frame: &[u8]) -> bool {
     frame.starts_with(&[0xff, 0xd8]) && frame.ends_with(&[0xff, 0xd9])
+}
+
+fn video_hosts(config: &VideoConfig) -> Vec<String> {
+    config
+        .hosts
+        .iter()
+        .map(|host| host.trim())
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn candidate_hosts(inner: &VideoRuntimeInner, device_id: &str) -> Vec<String> {
+    let hosts = video_hosts(&inner.config);
+    let remembered = inner.host_map.lock().await.get(device_id).cloned();
+
+    order_hosts(hosts, remembered)
+}
+
+fn order_hosts(hosts: Vec<String>, remembered: Option<String>) -> Vec<String> {
+    let Some(remembered) =
+        remembered.filter(|host| hosts.iter().any(|candidate| candidate == host))
+    else {
+        return hosts;
+    };
+
+    let mut ordered = Vec::with_capacity(hosts.len());
+    ordered.push(remembered.clone());
+    ordered.extend(hosts.into_iter().filter(|host| host != &remembered));
+    ordered
+}
+
+async fn remember_host(inner: &VideoRuntimeInner, device_id: &str, host: &str) {
+    inner
+        .host_map
+        .lock()
+        .await
+        .insert(device_id.to_owned(), host.to_owned());
 }
 
 fn error_chain(error: &anyhow::Error) -> String {
@@ -440,7 +555,10 @@ impl ServerCertVerifier for BambuCertificateVerifier {
 mod tests {
     use serde_json::json;
 
-    use super::{auth_packet, bambu_tls_connector, is_jpeg, mjpeg_part, select_session};
+    use super::{
+        auth_packet, bambu_tls_connector, is_jpeg, mjpeg_part, order_hosts, select_session,
+        video_hosts, VideoConfig,
+    };
     use crate::bambu::CloudDevice;
 
     fn device(value: serde_json::Value) -> CloudDevice {
@@ -469,10 +587,13 @@ mod tests {
 
     #[test]
     fn selected_session_uses_real_cloud_field_names() {
-        let session = select_session(vec![device(json!({
-            "dev_id": "printer-a",
-            "dev_access_code": "12345678\n"
-        }))])
+        let session = select_session(
+            vec![device(json!({
+                "dev_id": "printer-a",
+                "dev_access_code": "12345678\n"
+            }))],
+            None,
+        )
         .expect("single device should be selected");
 
         assert_eq!(session.device_id, "printer-a");
@@ -480,14 +601,75 @@ mod tests {
     }
 
     #[test]
-    fn selected_session_rejects_multiple_printers_with_video() {
-        let error = select_session(vec![
-            device(json!({"dev_id": "printer-a", "dev_access_code": "11111111"})),
-            device(json!({"dev_id": "printer-b", "dev_access_code": "22222222"})),
-        ])
+    fn selected_session_uses_first_stable_device_by_default() {
+        let session = select_session(
+            vec![
+                device(json!({"dev_id": "printer-a", "dev_access_code": "11111111"})),
+                device(json!({"dev_id": "printer-b", "dev_access_code": "22222222"})),
+            ],
+            None,
+        )
+        .expect("first device should be selected");
+
+        assert_eq!(session.device_id, "printer-a");
+        assert_eq!(session.access_code, "11111111");
+    }
+
+    #[test]
+    fn selected_session_can_match_requested_device_id() {
+        let session = select_session(
+            vec![
+                device(json!({"dev_id": "printer-a", "dev_access_code": "11111111"})),
+                device(json!({"dev_id": "printer-b", "dev_access_code": "22222222"})),
+            ],
+            Some("printer-b"),
+        )
+        .expect("requested device should be selected");
+
+        assert_eq!(session.device_id, "printer-b");
+        assert_eq!(session.access_code, "22222222");
+    }
+
+    #[test]
+    fn selected_session_rejects_unknown_requested_device_id() {
+        let error = select_session(
+            vec![device(
+                json!({"dev_id": "printer-a", "dev_access_code": "11111111"}),
+            )],
+            Some("printer-b"),
+        )
         .unwrap_err();
 
-        assert!(error.to_string().contains("exactly one printer"));
+        assert!(error.to_string().contains("printer-b"));
+    }
+
+    #[test]
+    fn video_hosts_trim_empty_entries() {
+        let hosts = video_hosts(&VideoConfig {
+            hosts: vec![
+                " 192.168.1.50 ".to_owned(),
+                String::new(),
+                "  ".to_owned(),
+                "printer.local".to_owned(),
+            ],
+            port: 6000,
+        });
+
+        assert_eq!(hosts, ["192.168.1.50", "printer.local"]);
+    }
+
+    #[test]
+    fn remembered_video_host_is_tried_first() {
+        let hosts = order_hosts(
+            vec![
+                "192.168.1.50".to_owned(),
+                "192.168.1.51".to_owned(),
+                "192.168.1.52".to_owned(),
+            ],
+            Some("192.168.1.51".to_owned()),
+        );
+
+        assert_eq!(hosts, ["192.168.1.51", "192.168.1.50", "192.168.1.52"]);
     }
 
     #[test]

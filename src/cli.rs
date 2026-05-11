@@ -24,6 +24,8 @@ pub struct Cli {
 enum Command {
     #[command(about = "Log in and store an access token")]
     Login(LoginArgs),
+    #[command(about = "List printers in the token account")]
+    Devices(DevicesArgs),
     #[command(about = "Serve an OBS browser overlay page")]
     Serve(ServeArgs),
 }
@@ -57,6 +59,14 @@ struct LoginArgs {
 }
 
 #[derive(Args)]
+struct DevicesArgs {
+    #[command(flatten)]
+    token: TokenFileArgs,
+    #[arg(long, default_value_t = 30.0, value_parser = positive_f64)]
+    timeout: f64,
+}
+
+#[derive(Args)]
 struct ServeArgs {
     #[command(flatten)]
     token: TokenFileArgs,
@@ -76,8 +86,12 @@ struct ServeArgs {
     mqtt_port: u16,
     #[arg(long)]
     no_mqtt: bool,
-    #[arg(long)]
-    video_host: Option<String>,
+    #[arg(
+        long = "video-host",
+        value_name = "VIDEO_HOST",
+        help = "Printer LAN IP or hostname for video; repeat for multiple printers"
+    )]
+    video_hosts: Vec<String>,
     #[arg(long, default_value_t = DEFAULT_VIDEO_PORT)]
     video_port: u16,
 }
@@ -85,6 +99,7 @@ struct ServeArgs {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login(args) => login(args).await,
+        Command::Devices(args) => devices_cmd(args).await,
         Command::Serve(args) => serve_cmd(args).await,
     }
 }
@@ -122,8 +137,38 @@ async fn login(args: LoginArgs) -> Result<()> {
     Ok(())
 }
 
+async fn devices_cmd(args: DevicesArgs) -> Result<()> {
+    let (client, access_token) = token_client(args.token.token_file, args.timeout)?;
+    let current_print = client.current_print(&access_token).await?;
+
+    println!(
+        "{:<24}  {:<32}  {:<8}  {:<1}",
+        "ID", "NAME", "ONLINE", "MODEL"
+    );
+    for device in current_print.devices {
+        let id = device.id.unwrap_or_else(|| "--".to_owned());
+        let name = device.name.unwrap_or_else(|| "--".to_owned());
+        let online = match device.online {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "--",
+        };
+        let model = device
+            .product_name
+            .or(device.model_name)
+            .unwrap_or_else(|| "--".to_owned());
+        println!("{id:<24}  {name:<32}  {online:<8}  {model}");
+    }
+    Ok(())
+}
+
 async fn serve_cmd(args: ServeArgs) -> Result<()> {
-    let token_data = load_token(args.token.token_file.clone())?;
+    let (client, access_token) = token_client(args.token.token_file.clone(), args.timeout)?;
+    serve(client, access_token, ServerConfig::from(&args)).await
+}
+
+fn token_client(token_file: Option<PathBuf>, timeout: f64) -> Result<(BambuClient, String)> {
+    let token_data = load_token(token_file)?;
     let access_token = token_data
         .access_token
         .as_deref()
@@ -135,8 +180,8 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
         .as_deref()
         .filter(|api_base| !api_base.is_empty())
         .unwrap_or(API_BASE);
-    let client = BambuClient::new(api_base, Duration::from_secs_f64(args.timeout))?;
-    serve(client, access_token, ServerConfig::from(&args)).await
+    let client = BambuClient::new(api_base, Duration::from_secs_f64(timeout))?;
+    Ok((client, access_token))
 }
 
 fn client(args: &HttpArgs) -> Result<BambuClient> {
@@ -162,7 +207,7 @@ impl From<&ServeArgs> for ServerConfig {
             mqtt_port: args.mqtt_port,
             no_mqtt: args.no_mqtt,
             video: VideoConfig {
-                host: args.video_host.clone(),
+                hosts: args.video_hosts.clone(),
                 port: args.video_port,
             },
         }
