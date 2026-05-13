@@ -22,6 +22,7 @@
     thumbPendingUrl: null,
     thumbRequest: 0,
     events: null,
+    spoolIconId: 0,
   };
 
   function pickDevice(devices) {
@@ -57,13 +58,36 @@
   }
 
   function spoolSvg() {
+    const spoolIconId = ++state.spoolIconId;
+    const filamentBodyId = `spool-filament-body-${spoolIconId}`;
+    const filamentClipId = `spool-filament-clip-${spoolIconId}`;
+    const cutoutId = `spool-cutout-${spoolIconId}`;
+
     return `
-      <svg viewBox="0 0 48 48" aria-hidden="true">
-        <circle cx="24" cy="24" r="18" fill="currentColor" opacity="0.92"/>
-        <circle cx="24" cy="24" r="7" fill="rgba(9, 13, 16, 0.82)" stroke="rgba(255,255,255,0.5)" stroke-width="2"/>
-        <path d="M24 6a18 18 0 0 1 16 26" fill="none" stroke="rgba(255,255,255,0.62)" stroke-width="3" stroke-linecap="round"/>
-        <path d="M16 39a18 18 0 0 1-8-17" fill="none" stroke="rgba(0,0,0,0.28)" stroke-width="3" stroke-linecap="round"/>
-        <path d="M12 24c0-7 5-12 12-12s12 5 12 12-5 12-12 12" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2" stroke-linecap="round"/>
+      <svg viewBox="0 0 178 200" aria-hidden="true">
+        <defs>
+          <path id="${filamentBodyId}" d="M58 24 A66 12 0 0 1 124 24 A44.91 76 0 0 1 124 176 A66 12 0 0 1 58 176 A44.91 76 0 0 0 58 24 Z"/>
+          <clipPath id="${filamentClipId}">
+            <use href="#${filamentBodyId}"/>
+          </clipPath>
+          <path id="${cutoutId}" d="M-18 -35 A26 36 0 0 1 -29 -70 A31 18 0 0 1 0 -84 A31 18 0 0 1 29 -70 A26 36 0 0 1 18 -35 A40 40 0 0 0 -18 -35 Z"/>
+        </defs>
+        <ellipse cx="126" cy="100" rx="52" ry="88" fill="#4f5a70" stroke="#000" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        <use href="#${filamentBodyId}" fill="currentColor"/>
+        <g clip-path="url(#${filamentClipId})" fill="none" stroke="#111827" stroke-width="1.6" stroke-linecap="round" opacity=".24">
+          <path d="M74.5 24 A44.91 76 0 0 1 74.5 176"/>
+          <path d="M91 24 A44.91 76 0 0 1 91 176"/>
+          <path d="M107.5 24 A44.91 76 0 0 1 107.5 176"/>
+        </g>
+        <g transform="translate(58 100) scale(.6 1)">
+          <circle r="88" fill="#4f5a70" stroke="#000" stroke-width="1" vector-effect="non-scaling-stroke"/>
+          <g fill="currentColor" stroke="#252b3d" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke">
+            <use href="#${cutoutId}" transform="translate(0 6)"/>
+            <use href="#${cutoutId}" transform="rotate(120) translate(0 6)"/>
+            <use href="#${cutoutId}" transform="rotate(240) translate(0 6)"/>
+          </g>
+          <circle r="26" fill="#111827"/>
+        </g>
       </svg>
     `;
   }
