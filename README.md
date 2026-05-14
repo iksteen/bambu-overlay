@@ -60,15 +60,15 @@ Useful commands:
 ```sh
 bambu-overlay serve --host 0.0.0.0 --port 8765
 bambu-overlay serve --no-mqtt
-bambu-overlay serve --video-host 192.168.1.50
-bambu-overlay serve --video-host 192.168.1.50 --video-host 192.168.1.51
+bambu-overlay serve --video 192.168.1.50
+bambu-overlay serve --video 192.168.1.50 --video 192.168.1.51:6001
 ```
 
 Configuration is handled with command-line options. Use `--help` on any command
 to see the available options. `serve` reads the access token and API base from
 the token file and only exposes runtime settings such as `--token-file`,
 `--timeout`, `--refresh-seconds`, `--mqtt-host`, `--mqtt-port`, `--no-mqtt`,
-`--video-host`, and `--video-port`. `--video-host` can be repeated.
+and `--video`. `--video` can be repeated.
 
 ## Video
 
@@ -76,22 +76,22 @@ A1 and P1 series printers can expose their camera as MJPEG at
 `/api/video.mjpeg`:
 
 ```sh
-bambu-overlay serve --video-host 192.168.1.50
+bambu-overlay serve --video 192.168.1.50
 ```
 
-`--video-host` is a printer LAN IP address or hostname. Repeat it once per
-printer when serving multiple cameras. The printer video server uses port
-`6000` by default; override it with `--video-port` if needed. The LAN access
-code is fetched from Bambu Cloud on stream startup via the `dev_access_code`
-field in the current-print response and is not stored by `bambu-overlay`.
+`--video` is a printer LAN IP address or hostname, optionally followed by
+`:PORT`. Repeat it once per printer when serving multiple cameras. The printer
+video server uses port `6000` when no port is specified. The LAN access code is
+fetched from Bambu Cloud on stream startup via the `dev_access_code` field in
+the current-print response and is not stored by `bambu-overlay`.
 
 Select a camera with `/api/video.mjpeg?device=<DEVICE_ID>`. Without `device`,
 the first printer from the process-stable device list is used. For each selected
-device, `bambu-overlay` tries the configured video hosts with that device ID as
+device, `bambu-overlay` tries the configured video endpoints with that device ID as
 TLS SNI. The printer certificate common name is the device serial number, so
-`bambu-overlay` uses the certificate to reject mismatched hosts before sending
-the camera access code. It also remembers mismatched host/device pairs it
-discovers while probing, then remembers the host that successfully streams
+`bambu-overlay` uses the certificate to reject mismatched endpoints before sending
+the camera access code. It also remembers mismatched endpoint/device pairs it
+discovers while probing, then remembers the endpoint that successfully streams
 frames for the rest of the process.
 
 The video connection uses `native-tls` with only Bambu's BBL CA certificate

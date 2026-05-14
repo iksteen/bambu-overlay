@@ -25,7 +25,7 @@ use crate::{
     devices::DeviceRegistry,
     mqtt::{initial_device_ids, supervise, MqttRuntime},
     overlay::{error_payload, SnapshotService},
-    video::{mjpeg_content_type, VideoConfig, VideoRuntime},
+    video::{mjpeg_content_type, VideoEndpoint, VideoRuntime},
 };
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -42,7 +42,7 @@ pub struct ServerConfig {
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub no_mqtt: bool,
-    pub video: VideoConfig,
+    pub video_endpoints: Vec<VideoEndpoint>,
 }
 
 impl Default for ServerConfig {
@@ -55,7 +55,7 @@ impl Default for ServerConfig {
             mqtt_host: MQTT_HOST.to_owned(),
             mqtt_port: MQTT_PORT,
             no_mqtt: false,
-            video: VideoConfig::default(),
+            video_endpoints: Vec::new(),
         }
     }
 }
@@ -86,7 +86,7 @@ pub async fn serve(client: BambuClient, access_token: String, config: ServerConf
     let video = VideoRuntime::new(
         client.clone(),
         access_token.clone(),
-        config.video.clone(),
+        config.video_endpoints.clone(),
         devices.clone(),
     )?;
 
