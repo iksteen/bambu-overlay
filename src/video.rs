@@ -461,11 +461,11 @@ async fn resolve_session(
     inner: &VideoRuntimeInner,
     requested_device_id: Option<&str>,
 ) -> Result<VideoSession> {
-    select_session(inner.devices.clone(), requested_device_id)
+    select_session(&inner.devices, requested_device_id)
 }
 
 fn select_session(
-    devices: Vec<KnownDevice>,
+    devices: &[KnownDevice],
     requested_device_id: Option<&str>,
 ) -> Result<VideoSession> {
     let requested_device_id = requested_device_id
@@ -473,7 +473,7 @@ fn select_session(
         .filter(|device_id| !device_id.is_empty());
 
     if let Some(requested_device_id) = requested_device_id {
-        let Some(device) = devices.into_iter().find(|device| {
+        let Some(device) = devices.iter().find(|device| {
             device
                 .id
                 .as_deref()
@@ -487,15 +487,15 @@ fn select_session(
         });
     }
 
-    let Some(device) = devices.into_iter().next() else {
+    let Some(device) = devices.first() else {
         bail!("no devices are known");
     };
     video_session(device).context("first device did not include dev_access_code")
 }
 
-fn video_session(device: KnownDevice) -> Option<VideoSession> {
-    let device_id = device.id?.trim().to_owned();
-    let access_code = device.access_code?.trim().to_owned();
+fn video_session(device: &KnownDevice) -> Option<VideoSession> {
+    let device_id = device.id.as_deref()?.trim().to_owned();
+    let access_code = device.access_code.as_deref()?.trim().to_owned();
     if device_id.is_empty() || access_code.is_empty() {
         return None;
     }
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn selected_session_uses_real_cloud_field_names() {
         let session = select_session(
-            vec![device(json!({
+            &[device(json!({
                 "dev_id": "printer-a",
                 "dev_access_code": "12345678\n"
             }))],
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn selected_session_uses_first_stable_device_by_default() {
         let session = select_session(
-            vec![
+            &[
                 device(json!({"dev_id": "printer-a", "dev_access_code": "11111111"})),
                 device(json!({"dev_id": "printer-b", "dev_access_code": "22222222"})),
             ],
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn selected_session_can_match_requested_device_id() {
         let session = select_session(
-            vec![
+            &[
                 device(json!({"dev_id": "printer-a", "dev_access_code": "11111111"})),
                 device(json!({"dev_id": "printer-b", "dev_access_code": "22222222"})),
             ],
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn selected_session_rejects_unknown_requested_device_id() {
         let error = select_session(
-            vec![device(
+            &[device(
                 json!({"dev_id": "printer-a", "dev_access_code": "11111111"}),
             )],
             Some("printer-b"),

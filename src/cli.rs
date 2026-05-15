@@ -9,7 +9,7 @@ use crate::{
     cloud::CloudSession,
     local::{Endpoint, LocalEndpointArg, MqttEndpoint},
     video::VideoEndpoint,
-    web::{serve, DeviceConfig, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
+    web::{serve, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
 };
 
 #[derive(Parser)]
@@ -114,10 +114,11 @@ struct ServeArgs {
     #[arg(
         long = "cloud-device",
         value_name = "DEVICE_ID",
+        value_parser = parse_cloud_device_id,
         help = "Explicit Bambu Cloud MQTT device ID; repeat to add devices. When set, /bind enumeration is skipped",
         help_heading = "Cloud"
     )]
-    cloud_devices: Vec<DeviceConfig>,
+    cloud_devices: Vec<String>,
     #[arg(
         long = "local-device",
         value_name = "HOST[:PORT][,ACCESS_CODE[,NAME]]",
@@ -208,14 +209,11 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
     serve(cloud, config).await
 }
 
-fn validate_devices(cloud_devices: &[DeviceConfig]) -> Result<()> {
+fn validate_devices(cloud_devices: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
-    for device in cloud_devices {
-        if !seen.insert(device.id.as_str()) {
-            bail!(
-                "--cloud-device includes duplicate device id `{}`",
-                device.id
-            );
+    for device_id in cloud_devices {
+        if !seen.insert(device_id.as_str()) {
+            bail!("--cloud-device includes duplicate device id `{device_id}`");
         }
     }
     Ok(())
@@ -300,4 +298,33 @@ fn positive_f64(value: &str) -> std::result::Result<f64, String> {
 
 fn parse_bind_endpoint(value: &str) -> std::result::Result<Endpoint, String> {
     Endpoint::parse_with_default(value, "bind address", DEFAULT_PORT)
+}
+
+fn parse_cloud_device_id(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("cloud device id must not be empty".to_owned());
+    }
+    if value.contains(',') {
+        return Err(format!(
+            "invalid cloud device `{value}`: expected only DEVICE_ID"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cloud_device_id;
+
+    #[test]
+    fn cloud_device_parser_accepts_id_only() {
+        assert_eq!(parse_cloud_device_id(" printer-a ").unwrap(), "printer-a");
+    }
+
+    #[test]
+    fn cloud_device_parser_rejects_metadata() {
+        let error = parse_cloud_device_id("printer-a,12345678").unwrap_err();
+        assert!(error.contains("expected only DEVICE_ID"));
+    }
 }

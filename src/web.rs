@@ -33,7 +33,7 @@ use crate::{
     video::{mjpeg_content_type, VideoEndpoint, VideoRuntime},
 };
 
-pub use crate::{cloud::CloudSession, config::DeviceConfig};
+pub use crate::cloud::CloudSession;
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8765;
@@ -43,7 +43,7 @@ pub struct ServerConfig {
     pub bind: Endpoint,
     pub cloud_mqtt: MqttEndpoint,
     pub local_devices: Vec<LocalEndpointArg>,
-    pub cloud_devices: Vec<DeviceConfig>,
+    pub cloud_devices: Vec<String>,
     pub video_endpoints: Vec<VideoEndpoint>,
 }
 

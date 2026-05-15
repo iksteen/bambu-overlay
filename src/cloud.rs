@@ -5,7 +5,6 @@ use tracing::{error, warn};
 
 use crate::{
     bambu::{BambuClient, CloudDevice},
-    config::DeviceConfig,
     local::MqttEndpoint,
     mqtt::{supervise_cloud, MqttRuntime},
 };
@@ -26,18 +25,13 @@ pub(crate) struct CloudMqttStartup {
 
 pub(crate) async fn cloud_devices(
     cloud: Option<&CloudSession>,
-    configs: &[DeviceConfig],
+    configs: &[String],
     enumerate_catalog: bool,
 ) -> Result<Vec<CloudDevice>> {
-    let bound = if enumerate_catalog {
-        bound_cloud_devices(cloud).await?
-    } else {
-        Vec::new()
-    };
     if enumerate_catalog {
-        Ok(bound)
+        bound_cloud_devices(cloud).await
     } else {
-        Ok(explicit_cloud_devices(configs, &[]))
+        Ok(explicit_cloud_devices(configs))
     }
 }
 
@@ -50,26 +44,16 @@ pub(crate) async fn bound_cloud_devices(cloud: Option<&CloudSession>) -> Result<
     Ok(bound.devices)
 }
 
-fn explicit_cloud_devices(configs: &[DeviceConfig], metadata: &[CloudDevice]) -> Vec<CloudDevice> {
+fn explicit_cloud_devices(configs: &[String]) -> Vec<CloudDevice> {
     configs
         .iter()
-        .map(|config| explicit_cloud_device(config, metadata))
+        .map(|device_id| explicit_cloud_device(device_id))
         .collect()
 }
 
-fn explicit_cloud_device(config: &DeviceConfig, metadata: &[CloudDevice]) -> CloudDevice {
-    let mut device = metadata
-        .iter()
-        .find(|device| device.id.as_deref() == Some(config.id.as_str()))
-        .cloned()
-        .unwrap_or_else(|| config_cloud_device(config));
-    device.id = Some(config.id.clone());
-    device
-}
-
-fn config_cloud_device(config: &DeviceConfig) -> CloudDevice {
+fn explicit_cloud_device(device_id: &str) -> CloudDevice {
     CloudDevice {
-        id: Some(config.id.clone()),
+        id: Some(device_id.to_owned()),
         online: Some(true),
         ..CloudDevice::default()
     }
@@ -154,8 +138,8 @@ async fn cloud_mqtt_user_id(cloud: &CloudSession) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bound_cloud_devices, cloud_devices, cloud_mqtt_startup, explicit_cloud_devices};
-    use crate::{bambu::CloudDevice, config::DeviceConfig, local::MqttEndpoint};
+    use super::{bound_cloud_devices, cloud_devices, cloud_mqtt_startup};
+    use crate::local::MqttEndpoint;
 
     fn mqtt_endpoint(value: &str) -> MqttEndpoint {
         value.parse().expect("MQTT endpoint should parse")
@@ -188,15 +172,9 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_cloud_devices_do_not_require_cloud_session_for_catalog() {
-        let devices = cloud_devices(
-            None,
-            &[DeviceConfig {
-                id: "printer-a".to_owned(),
-            }],
-            false,
-        )
-        .await
-        .unwrap();
+        let devices = cloud_devices(None, &["printer-a".to_owned()], false)
+            .await
+            .unwrap();
 
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id.as_deref(), Some("printer-a"));
@@ -216,33 +194,5 @@ mod tests {
 
         assert!(error.to_string().contains("/bind metadata"));
         assert!(error.to_string().contains("Bambu Cloud token"));
-    }
-
-    #[test]
-    fn explicit_cloud_devices_can_use_fetched_metadata_without_enumerating_extra_devices() {
-        let devices = explicit_cloud_devices(
-            &[DeviceConfig {
-                id: "printer-a".to_owned(),
-            }],
-            &[
-                CloudDevice {
-                    id: Some("printer-a".to_owned()),
-                    name: Some("Office".to_owned()),
-                    access_code: Some("12345678".to_owned()),
-                    ..CloudDevice::default()
-                },
-                CloudDevice {
-                    id: Some("printer-b".to_owned()),
-                    name: Some("Garage".to_owned()),
-                    access_code: Some("87654321".to_owned()),
-                    ..CloudDevice::default()
-                },
-            ],
-        );
-
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].id.as_deref(), Some("printer-a"));
-        assert_eq!(devices[0].name.as_deref(), Some("Office"));
-        assert_eq!(devices[0].access_code.as_deref(), Some("12345678"));
     }
 }

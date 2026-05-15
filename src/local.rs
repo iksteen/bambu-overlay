@@ -17,16 +17,14 @@ pub type MqttEndpoint = Endpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEndpoint {
-    pub host: String,
-    pub port: u16,
+    pub endpoint: Endpoint,
     pub access_code: String,
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEndpointArg {
-    pub host: String,
-    pub port: u16,
+    pub endpoint: Endpoint,
     pub access_code: Option<String>,
     pub name: Option<String>,
 }
@@ -40,15 +38,22 @@ pub struct LocalDevice {
 impl LocalEndpoint {
     pub fn new(host: impl Into<String>, port: u16, access_code: impl Into<String>) -> Self {
         Self {
-            host: host.into(),
-            port,
+            endpoint: Endpoint::new(host, port),
             access_code: access_code.into(),
             name: None,
         }
     }
 
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::new(self.host.clone(), self.port)
+        self.endpoint.clone()
+    }
+
+    pub fn host(&self) -> &str {
+        self.endpoint.host.as_str()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.endpoint.port
     }
 
     pub fn address(&self) -> String {
@@ -66,7 +71,15 @@ impl LocalEndpoint {
 
 impl LocalEndpointArg {
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::new(self.host.clone(), self.port)
+        self.endpoint.clone()
+    }
+
+    pub fn host(&self) -> &str {
+        self.endpoint.host.as_str()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.endpoint.port
     }
 
     pub fn address(&self) -> String {
@@ -83,8 +96,7 @@ impl LocalEndpointArg {
 
     pub fn into_endpoint(self, access_code: String) -> LocalEndpoint {
         LocalEndpoint {
-            host: self.host,
-            port: self.port,
+            endpoint: self.endpoint,
             access_code,
             name: self.name,
         }
@@ -135,13 +147,13 @@ impl fmt::Display for LocalDevice {
 
 impl fmt::Display for LocalEndpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.endpoint().fmt(formatter)
+        self.endpoint.fmt(formatter)
     }
 }
 
 impl fmt::Display for LocalEndpointArg {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.endpoint().fmt(formatter)
+        self.endpoint.fmt(formatter)
     }
 }
 
@@ -158,7 +170,7 @@ pub async fn infer_local_device_id(device: &LocalEndpointArg) -> Result<String> 
     let address = endpoint.to_string();
     let tcp = tokio::time::timeout(
         LOCAL_MQTT_PROBE_TIMEOUT,
-        TcpStream::connect((device.host.as_str(), device.port)),
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
     )
     .await
     .with_context(|| format!("timed out probing local MQTT TLS at {address}"))?
@@ -167,7 +179,7 @@ pub async fn infer_local_device_id(device: &LocalEndpointArg) -> Result<String> 
     let tls = device_tls::tokio_connector()?;
     let socket = tokio::time::timeout(
         LOCAL_MQTT_PROBE_TIMEOUT,
-        tls.connect(device.host.as_str(), tcp),
+        tls.connect(endpoint.host.as_str(), tcp),
     )
     .await
     .with_context(|| format!("timed out handshaking local MQTT TLS at {address}"))?
@@ -207,8 +219,7 @@ pub(crate) fn parse_local_endpoint_arg(
     let name = optional_field(&fields, 2);
 
     Ok(LocalEndpointArg {
-        host: parsed.host,
-        port: parsed.port,
+        endpoint: parsed,
         access_code,
         name,
     })
@@ -312,8 +323,8 @@ mod tests {
     fn local_device_parser_accepts_default_mqtt_port() {
         let device = local_device_arg("192.168.1.50,12345678,Office X1");
 
-        assert_eq!(device.host, "192.168.1.50");
-        assert_eq!(device.port, 8883);
+        assert_eq!(device.endpoint.host, "192.168.1.50");
+        assert_eq!(device.endpoint.port, 8883);
         assert_eq!(device.access_code.as_deref(), Some("12345678"));
         assert_eq!(device.name.as_deref(), Some("Office X1"));
     }
@@ -322,8 +333,8 @@ mod tests {
     fn local_device_parser_accepts_custom_port() {
         let device = local_device_arg("printer.local:18883,12345678");
 
-        assert_eq!(device.host, "printer.local");
-        assert_eq!(device.port, 18883);
+        assert_eq!(device.endpoint.host, "printer.local");
+        assert_eq!(device.endpoint.port, 18883);
         assert_eq!(device.name, None);
     }
 
@@ -331,7 +342,7 @@ mod tests {
     fn local_device_parser_accepts_missing_access_code() {
         let device = local_device_arg("printer.local");
 
-        assert_eq!(device.host, "printer.local");
+        assert_eq!(device.endpoint.host, "printer.local");
         assert_eq!(device.access_code, None);
         assert_eq!(device.name, None);
 
@@ -345,8 +356,8 @@ mod tests {
     fn local_device_parser_accepts_bracketed_ipv6() {
         let device = local_device_arg("[fe80::1]:18883,12345678");
 
-        assert_eq!(device.host, "fe80::1");
-        assert_eq!(device.port, 18883);
+        assert_eq!(device.endpoint.host, "fe80::1");
+        assert_eq!(device.endpoint.port, 18883);
     }
 
     #[test]
@@ -362,8 +373,8 @@ mod tests {
     fn local_device_config_accepts_host_only_form() {
         let device = local_device_arg("printer.local:18883,12345678,Office X1");
 
-        assert_eq!(device.host, "printer.local");
-        assert_eq!(device.port, 18883);
+        assert_eq!(device.endpoint.host, "printer.local");
+        assert_eq!(device.endpoint.port, 18883);
         assert_eq!(device.access_code.as_deref(), Some("12345678"));
         assert_eq!(device.name.as_deref(), Some("Office X1"));
     }

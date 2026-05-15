@@ -10,7 +10,6 @@ use crate::{
         bound_cloud_devices, cloud_devices as resolve_cloud_devices, cloud_mqtt_device_ids,
         CloudSession,
     },
-    config::DeviceConfig,
     local::{infer_local_device_id, Endpoint, LocalDevice, LocalEndpointArg},
     video::{infer_video_device_id, probe_video_endpoint, VideoEndpoint, DEFAULT_VIDEO_PORT},
 };
@@ -77,7 +76,7 @@ pub(crate) struct ResolvedVideoEndpoints {
 
 pub(crate) async fn resolve_devices(
     cloud: Option<&CloudSession>,
-    cloud_configs: &[DeviceConfig],
+    cloud_configs: &[String],
     local_configs: &[LocalEndpointArg],
     video_endpoints: &[VideoEndpoint],
 ) -> Result<ResolvedDevices> {
@@ -259,7 +258,7 @@ async fn resolve_explicit_video_endpoints(
 
 fn should_enumerate_cloud_catalog(
     cloud_available: bool,
-    cloud_configs: &[DeviceConfig],
+    cloud_configs: &[String],
     local_devices: &[(String, LocalEndpointArg)],
 ) -> bool {
     cloud_available && cloud_configs.is_empty() && local_devices.is_empty()
@@ -424,7 +423,7 @@ fn ensure_video_device_exists(
 
 fn local_video_endpoint(device: &LocalDevice) -> VideoEndpoint {
     VideoEndpoint::new(
-        Endpoint::new(device.endpoint.host.clone(), DEFAULT_VIDEO_PORT),
+        Endpoint::new(device.endpoint.host().to_owned(), DEFAULT_VIDEO_PORT),
         None,
     )
 }
@@ -440,7 +439,6 @@ mod tests {
     };
     use crate::{
         bambu::CloudDevice,
-        config::DeviceConfig,
         local::{LocalDevice, LocalEndpointArg},
         video::VideoEndpoint,
     };
@@ -574,9 +572,7 @@ mod tests {
         assert!(!should_enumerate_cloud_catalog(false, &[], &[]));
         assert!(!should_enumerate_cloud_catalog(
             true,
-            &[DeviceConfig {
-                id: "printer-a".to_owned(),
-            }],
+            &["printer-a".to_owned()],
             &[]
         ));
         assert!(!should_enumerate_cloud_catalog(

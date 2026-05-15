@@ -186,7 +186,7 @@ impl<'a> DeviceFields<'a> {
             || self.print_i64(|print| print.layer_total).is_some()
     }
 
-    fn summary(&self) -> (Option<String>, DeviceSummary) {
+    fn summary(&self) -> DeviceSummary {
         let device_id = self.device_id();
         let task_id = self.task_id();
         let task_name = self.task_name();
@@ -203,8 +203,8 @@ impl<'a> DeviceFields<'a> {
             progress,
         );
 
-        let summary = DeviceSummary {
-            id: device_id.clone(),
+        DeviceSummary {
+            id: device_id,
             name: self
                 .device
                 .name
@@ -234,9 +234,7 @@ impl<'a> DeviceFields<'a> {
             is_printing: has_print_status_task,
             task_source: TaskSource::PrinterStatus,
             plate_index: None,
-        };
-
-        (device_id, summary)
+        }
     }
 }
 
@@ -256,11 +254,7 @@ fn summarize_device(
 ) -> DeviceSummary {
     let report = device.id.as_ref().and_then(|id| reports.get(id));
     let fields = DeviceFields::new(device, report);
-    let (device_id, mut summary) = fields.summary();
-    if summary.id.is_none() {
-        summary.id = device_id;
-    }
-    summary
+    fields.summary()
 }
 
 pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {

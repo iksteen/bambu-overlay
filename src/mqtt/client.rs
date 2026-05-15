@@ -114,7 +114,7 @@ async fn supervise_local(runtime: MqttRuntime, device: LocalDevice) {
                     .await;
                 warn!(
                     device_id = %device.id,
-                    host = %device.endpoint.host,
+                    host = %device.endpoint.host(),
                     error = %error,
                     "local MQTT disconnected"
                 );
@@ -186,8 +186,8 @@ async fn run_cloud_once(
 async fn run_local_once(runtime: &MqttRuntime, device: &LocalDevice) -> Result<()> {
     let mut options = MqttOptions::new(
         format!("bambu-overlay-{}", Uuid::new_v4()),
-        device.endpoint.host.as_str(),
-        device.endpoint.port,
+        device.endpoint.host(),
+        device.endpoint.port(),
     );
     options.set_keep_alive(KEEPALIVE);
     options.set_credentials("bblp", device.endpoint.access_code.as_str());
