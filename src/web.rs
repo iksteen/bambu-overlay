@@ -75,7 +75,6 @@ struct DeviceQuery {
 #[derive(Clone)]
 struct KnownDevices {
     devices: Vec<KnownDevice>,
-    probed_video_ids: HashSet<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,7 +153,6 @@ fn app_state(
 ) -> Result<AppState> {
     let known_devices = KnownDevices {
         devices: devices.catalog.clone(),
-        probed_video_ids: video_endpoints.probed_device_ids.clone(),
     };
     let snapshot = SnapshotService::new(devices.catalog.clone(), mqtt.clone());
     let video = VideoRuntime::new(
@@ -189,8 +187,7 @@ impl KnownDevices {
     ) -> KnownDevicePayload {
         let id = device.id.as_deref();
         let has_access_code = device.has_access_code();
-        let has_video = id
-            .is_some_and(|id| self.probed_video_ids.contains(id) || runtime_video_ids.contains(id));
+        let has_video = id.is_some_and(|id| runtime_video_ids.contains(id));
         let has_video = has_access_code && has_video;
 
         KnownDevicePayload {
@@ -411,10 +408,11 @@ mod tests {
                     source: DeviceSource::Cloud,
                 },
             ],
-            probed_video_ids: HashSet::from(["printer a/1".to_owned()]),
         };
 
-        let value = serde_json::to_value(devices.payload(&HashSet::new())).unwrap();
+        let value =
+            serde_json::to_value(devices.payload(&HashSet::from(["printer a/1".to_owned()])))
+                .unwrap();
         let json = value.to_string();
         assert!(!json.contains("12345678"));
         assert!(!json.contains("87654321"));
