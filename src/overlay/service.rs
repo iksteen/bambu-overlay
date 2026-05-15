@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::{
-    bambu::{CloudDevice, CurrentPrintResponse, TasksResponse},
+    devices::KnownDevice,
     mqtt::{MqttRuntime, MqttStatusPayload},
 };
 
@@ -11,7 +11,7 @@ use super::summary::{overlay_device, summarize_devices, OverlayDevice};
 
 #[derive(Clone)]
 pub struct SnapshotService {
-    devices: Vec<CloudDevice>,
+    devices: Vec<KnownDevice>,
     mqtt: MqttRuntime,
 }
 
@@ -35,18 +35,14 @@ pub struct ErrorPayload {
 }
 
 impl SnapshotService {
-    pub fn new(devices: Vec<CloudDevice>, mqtt: MqttRuntime) -> Self {
+    pub(crate) fn new(devices: Vec<KnownDevice>, mqtt: MqttRuntime) -> Self {
         Self { devices, mqtt }
     }
 
     pub async fn payload(&self) -> Result<OverlayPayload> {
-        let current_print = CurrentPrintResponse {
-            devices: self.devices.clone(),
-        };
-        let tasks = TasksResponse::default();
         let reports = self.mqtt.reports().await;
         let status = self.mqtt.status().await;
-        let devices = summarize_devices(&current_print, &tasks, &reports)
+        let devices = summarize_devices(&self.devices, &reports)
             .into_iter()
             .map(overlay_device)
             .collect();

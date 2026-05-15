@@ -7,7 +7,7 @@ use crate::{
     auth::{default_token_path, load_token, save_token},
     bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST},
     cloud::CloudSession,
-    local::{Endpoint, LocalDeviceConfig, MqttEndpoint},
+    local::{Endpoint, LocalEndpointArg, MqttEndpoint},
     video::VideoEndpoint,
     web::{serve, DeviceConfig, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
 };
@@ -104,12 +104,6 @@ struct ServeArgs {
     )]
     timeout: f64,
     #[arg(
-        long = "no-cloud-enum",
-        help = "Do not enumerate Bambu Cloud /bind devices while serving",
-        help_heading = "Cloud"
-    )]
-    no_cloud_enum: bool,
-    #[arg(
         long = "cloud-mqtt",
         value_name = "HOST[:PORT]",
         default_value = MQTT_HOST,
@@ -119,22 +113,22 @@ struct ServeArgs {
     cloud_mqtt: MqttEndpoint,
     #[arg(
         long = "cloud-device",
-        value_name = "DEVICE_ID[,ACCESS_CODE[,NAME]]",
-        help = "Explicit Bambu Cloud MQTT device; repeat to add or override devices. Does not disable /bind enumeration; use --no-cloud-enum for that",
+        value_name = "DEVICE_ID",
+        help = "Explicit Bambu Cloud MQTT device ID; repeat to add devices. When set, /bind enumeration is skipped",
         help_heading = "Cloud"
     )]
     cloud_devices: Vec<DeviceConfig>,
     #[arg(
         long = "local-device",
         value_name = "HOST[:PORT][,ACCESS_CODE[,NAME]]",
-        help = "Printer LAN MQTT device; repeat for multiple printers. Port defaults to 8883. The device ID is inferred from the MQTT certificate. ACCESS_CODE can be provided here, by matching /bind metadata, or by a matching --cloud-device",
+        help = "Printer LAN MQTT device; repeat for multiple printers. Port defaults to 8883. The device ID is inferred from the MQTT certificate. ACCESS_CODE can be provided here or looked up from /bind when needed",
         help_heading = "Local LAN"
     )]
-    local_devices: Vec<LocalDeviceConfig>,
+    local_devices: Vec<LocalEndpointArg>,
     #[arg(
         long = "video-device",
-        value_name = "HOST[:PORT]",
-        help = "Printer LAN video endpoint; repeat for multiple printers. Port defaults to 6000. The device ID is inferred from the video certificate and must match a configured cloud or local device",
+        value_name = "HOST[:PORT][,ACCESS_CODE]",
+        help = "Printer LAN video endpoint; repeat for multiple printers. Port defaults to 6000. The device ID is inferred from the video certificate and must match a configured cloud or local device. ACCESS_CODE can be provided here or looked up from /bind when needed",
         help_heading = "Local LAN"
     )]
     video_devices: Vec<VideoEndpoint>,
@@ -274,7 +268,6 @@ impl From<&ServeArgs> for ServerConfig {
         Self {
             bind: args.bind.clone(),
             cloud_mqtt: args.cloud_mqtt.clone(),
-            no_cloud_enum: args.no_cloud_enum,
             local_devices: args.local_devices.clone(),
             cloud_devices: args.cloud_devices.clone(),
             video_endpoints: args.video_devices.clone(),

@@ -1,57 +1,72 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    str::FromStr,
-};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use tracing::{debug, info};
 
 use crate::{
-    bambu::CloudDevice,
-    cloud::{cloud_devices as resolve_cloud_devices, cloud_mqtt_device_ids, CloudSession},
-    local::{infer_local_device_id, LocalDevice, LocalDeviceConfig},
+    bambu::{CloudDevice, PrinterStatus},
+    cloud::{
+        bound_cloud_devices, cloud_devices as resolve_cloud_devices, cloud_mqtt_device_ids,
+        CloudSession,
+    },
+    config::DeviceConfig,
+    local::{infer_local_device_id, Endpoint, LocalDevice, LocalEndpointArg},
     video::{infer_video_device_id, probe_video_endpoint, VideoEndpoint, DEFAULT_VIDEO_PORT},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceConfig {
-    pub id: String,
-    pub access_code: Option<String>,
-    pub name: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceSource {
+    Cloud,
+    Local,
 }
 
-impl DeviceConfig {
-    pub(crate) fn cloud_device(&self) -> CloudDevice {
-        CloudDevice {
-            id: Some(self.id.clone()),
-            name: self.name.clone(),
-            online: Some(true),
-            access_code: self.access_code.clone(),
-            ..CloudDevice::default()
+#[derive(Debug, Clone)]
+pub(crate) struct KnownDevice {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) online: Option<bool>,
+    pub(crate) access_code: Option<String>,
+    pub(crate) status: PrinterStatus,
+    pub(crate) source: DeviceSource,
+}
+
+impl KnownDevice {
+    pub(crate) fn from_cloud(device: CloudDevice) -> Self {
+        Self {
+            id: device.id,
+            name: device.name,
+            online: device.online,
+            access_code: device.access_code,
+            status: device.status,
+            source: DeviceSource::Cloud,
         }
     }
-}
 
-impl FromStr for DeviceConfig {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        parse_device_config(value)
+    pub(crate) fn from_local(device: &LocalDevice) -> Self {
+        Self {
+            id: Some(device.id.clone()),
+            name: device.endpoint.name.clone(),
+            online: Some(true),
+            access_code: Some(device.endpoint.access_code.clone()),
+            status: PrinterStatus::default(),
+            source: DeviceSource::Local,
+        }
     }
-}
 
-impl fmt::Display for DeviceConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.id)
+    pub(crate) fn has_access_code(&self) -> bool {
+        self.access_code
+            .as_deref()
+            .is_some_and(|code| !code.trim().is_empty())
     }
 }
 
 pub(crate) struct ResolvedDevices {
-    pub(crate) catalog: Vec<CloudDevice>,
+    pub(crate) catalog: Vec<KnownDevice>,
     pub(crate) local: Vec<LocalDevice>,
-    pub(crate) local_ids: HashSet<String>,
     pub(crate) cloud_mqtt_ids: Vec<String>,
+    explicit_video: Vec<(String, VideoEndpoint)>,
 }
 
 pub(crate) struct ResolvedVideoEndpoints {
@@ -63,49 +78,50 @@ pub(crate) struct ResolvedVideoEndpoints {
 pub(crate) async fn resolve_devices(
     cloud: Option<&CloudSession>,
     cloud_configs: &[DeviceConfig],
-    local_configs: &[LocalDeviceConfig],
-    no_cloud_enum: bool,
+    local_configs: &[LocalEndpointArg],
+    video_endpoints: &[VideoEndpoint],
 ) -> Result<ResolvedDevices> {
-    let cloud_devices = resolve_cloud_devices(cloud, cloud_configs, no_cloud_enum).await?;
-    let mut local = resolve_local_devices(local_configs).await?;
-    ensure_unique_local_device_ids(&local)?;
-    merge_local_metadata(&mut local, &cloud_devices.metadata);
-    ensure_local_names(&mut local);
-    ensure_local_access_codes(&local)?;
+    let explicit_video = resolve_explicit_video_endpoints(video_endpoints).await?;
+    let local_args = infer_local_devices(local_configs).await?;
+    ensure_unique_local_device_ids(&local_args)?;
+    let enumerate_cloud_catalog =
+        should_enumerate_cloud_catalog(cloud.is_some(), cloud_configs, &local_args);
+    let cloud_devices =
+        resolve_cloud_devices(cloud, cloud_configs, enumerate_cloud_catalog).await?;
+    let mut bind_metadata = enumerate_cloud_catalog.then(|| cloud_devices.clone());
+    let local =
+        resolve_local_access(local_args, &explicit_video, cloud, &mut bind_metadata).await?;
 
     let local_ids = local_device_ids(&local);
-    let catalog = catalog_devices(cloud_devices.catalog, &local, &local_ids);
+    let cloud_mqtt_ids = cloud_mqtt_device_ids(&cloud_devices, &local_ids);
+    let mut catalog = catalog_devices(cloud_devices, &local, &local_ids);
+    resolve_catalog_video_access(&mut catalog, &explicit_video, cloud, &mut bind_metadata).await?;
     if catalog.is_empty() {
         anyhow::bail!(
             "no devices configured; run `bambu-overlay login`, set --cloud-device, or set --local-device"
         );
     }
 
-    let cloud_mqtt_ids = cloud_mqtt_device_ids(&catalog, &local_ids);
     Ok(ResolvedDevices {
         catalog,
         local,
-        local_ids,
         cloud_mqtt_ids,
+        explicit_video,
     })
 }
 
 pub(crate) async fn resolve_video_endpoints(
-    explicit: &[VideoEndpoint],
     devices: &ResolvedDevices,
 ) -> Result<ResolvedVideoEndpoints> {
     let catalog_ids = catalog_device_ids(&devices.catalog);
-    let mut endpoints = Vec::with_capacity(explicit.len() + devices.local.len());
+    let mut endpoints = Vec::with_capacity(devices.explicit_video.len() + devices.local.len());
     let mut probed_device_ids = HashSet::new();
     let mut endpoint_map = HashMap::new();
     let mut candidates = Vec::new();
     let mut probes = tokio::task::JoinSet::new();
 
-    for endpoint in explicit {
-        let device_id = infer_video_device_id(endpoint).await.with_context(|| {
-            format!("could not infer device ID for --video-device `{endpoint}`")
-        })?;
-        ensure_video_device_exists(endpoint, &device_id, &catalog_ids)?;
+    for (device_id, endpoint) in &devices.explicit_video {
+        ensure_video_device_exists(endpoint, device_id, &catalog_ids)?;
         info!(
             device_id = %device_id,
             endpoint = %endpoint,
@@ -114,7 +130,7 @@ pub(crate) async fn resolve_video_endpoints(
         endpoints.push(endpoint.clone());
         candidates.push(endpoint.clone());
         probed_device_ids.insert(device_id.clone());
-        endpoint_map.insert(device_id, endpoint.clone());
+        endpoint_map.insert(device_id.clone(), endpoint.clone());
     }
 
     for device in &devices.local {
@@ -164,75 +180,200 @@ pub(crate) async fn resolve_video_endpoints(
     })
 }
 
-async fn resolve_local_devices(configs: &[LocalDeviceConfig]) -> Result<Vec<LocalDevice>> {
+async fn infer_local_devices(
+    configs: &[LocalEndpointArg],
+) -> Result<Vec<(String, LocalEndpointArg)>> {
     let mut devices = Vec::with_capacity(configs.len());
     for config in configs {
         let id = infer_local_device_id(config).await.with_context(|| {
             format!(
                 "could not infer device ID for --local-device `{}`",
-                config.mqtt_endpoint()
+                config.endpoint()
             )
         })?;
         info!(
             device_id = %id,
-            endpoint = %config.mqtt_endpoint(),
+            endpoint = %config.endpoint(),
             "inferred local device ID from MQTT certificate"
         );
-        devices.push(config.clone().into_device(id));
+        devices.push((id, config.clone()));
     }
     Ok(devices)
 }
 
-fn ensure_unique_local_device_ids(local_devices: &[LocalDevice]) -> Result<()> {
-    let mut seen = HashSet::new();
+async fn resolve_local_access(
+    local_devices: Vec<(String, LocalEndpointArg)>,
+    video_endpoints: &[(String, VideoEndpoint)],
+    cloud: Option<&CloudSession>,
+    bind_metadata: &mut Option<Vec<CloudDevice>>,
+) -> Result<Vec<LocalDevice>> {
+    let mut devices = Vec::with_capacity(local_devices.len());
     for device in local_devices {
-        if !seen.insert(device.id.as_str()) {
+        devices.push(
+            resolve_local_device_access(device, video_endpoints, cloud, bind_metadata).await?,
+        );
+    }
+    Ok(devices)
+}
+
+async fn resolve_local_device_access(
+    device: (String, LocalEndpointArg),
+    video_endpoints: &[(String, VideoEndpoint)],
+    cloud: Option<&CloudSession>,
+    bind_metadata: &mut Option<Vec<CloudDevice>>,
+) -> Result<LocalDevice> {
+    let (device_id, mut endpoint) = device;
+    if !has_access_code(endpoint.access_code.as_deref()) {
+        if let Some(video) = explicit_video_for_device(video_endpoints, &device_id) {
+            endpoint.access_code = video.access_code().map(str::to_owned);
+        }
+    }
+    if !has_access_code(endpoint.access_code.as_deref()) {
+        if let Some(metadata) = bind_device(cloud, bind_metadata, &device_id).await? {
+            if !has_access_code(endpoint.access_code.as_deref()) {
+                endpoint.access_code = metadata.access_code;
+            }
+            if !has_text(endpoint.name.as_deref()) {
+                endpoint.name = metadata.name;
+            }
+        }
+    }
+    if !has_text(endpoint.name.as_deref()) {
+        endpoint.name = Some(device_id.clone());
+    }
+    finalize_local_device((device_id, endpoint))
+}
+
+async fn resolve_explicit_video_endpoints(
+    endpoints: &[VideoEndpoint],
+) -> Result<Vec<(String, VideoEndpoint)>> {
+    let mut resolved = Vec::with_capacity(endpoints.len());
+    for endpoint in endpoints {
+        let device_id = infer_video_device_id(endpoint).await.with_context(|| {
+            format!("could not infer device ID for --video-device `{endpoint}`")
+        })?;
+        resolved.push((device_id, endpoint.clone()));
+    }
+    Ok(resolved)
+}
+
+fn should_enumerate_cloud_catalog(
+    cloud_available: bool,
+    cloud_configs: &[DeviceConfig],
+    local_devices: &[(String, LocalEndpointArg)],
+) -> bool {
+    cloud_available && cloud_configs.is_empty() && local_devices.is_empty()
+}
+
+async fn resolve_catalog_video_access(
+    catalog: &mut [KnownDevice],
+    video_endpoints: &[(String, VideoEndpoint)],
+    cloud: Option<&CloudSession>,
+    bind_metadata: &mut Option<Vec<CloudDevice>>,
+) -> Result<()> {
+    for (device_id, video) in video_endpoints {
+        let Some(device) = catalog
+            .iter_mut()
+            .find(|device| device.id.as_deref() == Some(device_id.as_str()))
+        else {
+            continue;
+        };
+        resolve_known_device_access(device, video, cloud, bind_metadata).await?;
+    }
+    Ok(())
+}
+
+async fn resolve_known_device_access(
+    device: &mut KnownDevice,
+    video: &VideoEndpoint,
+    cloud: Option<&CloudSession>,
+    bind_metadata: &mut Option<Vec<CloudDevice>>,
+) -> Result<()> {
+    if !device.has_access_code() {
+        device.access_code = video.access_code().map(str::to_owned);
+    }
+    if !device.has_access_code() {
+        if let Some(device_id) = device.id.as_deref() {
+            if let Some(metadata) = bind_device(cloud, bind_metadata, device_id).await? {
+                if !device.has_access_code() {
+                    device.access_code = metadata.access_code;
+                }
+                if !has_text(device.name.as_deref()) {
+                    device.name = metadata.name;
+                }
+                if device.online.is_none() {
+                    device.online = metadata.online;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn bind_device(
+    cloud: Option<&CloudSession>,
+    bind_metadata: &mut Option<Vec<CloudDevice>>,
+    device_id: &str,
+) -> Result<Option<CloudDevice>> {
+    if bind_metadata.is_none() {
+        *bind_metadata = Some(bound_cloud_devices(cloud).await?);
+    }
+    Ok(bind_metadata
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|device| device.id.as_deref() == Some(device_id))
+        .cloned())
+}
+
+fn explicit_video_for_device<'a>(
+    video_endpoints: &'a [(String, VideoEndpoint)],
+    device_id: &str,
+) -> Option<&'a VideoEndpoint> {
+    video_endpoints
+        .iter()
+        .find(|(video_device_id, _)| video_device_id == device_id)
+        .map(|(_, endpoint)| endpoint)
+}
+
+fn has_access_code(access_code: Option<&str>) -> bool {
+    has_text(access_code)
+}
+
+fn has_text(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn ensure_unique_local_device_ids(local_devices: &[(String, LocalEndpointArg)]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for (device_id, _) in local_devices {
+        if !seen.insert(device_id.as_str()) {
             anyhow::bail!(
                 "--local-device resolves duplicate device id `{}`",
-                device.id
+                device_id
             );
         }
     }
     Ok(())
 }
 
-fn merge_local_metadata(local_devices: &mut [LocalDevice], cloud_devices: &[CloudDevice]) {
-    for local in local_devices {
-        if let Some(cloud) = cloud_devices
-            .iter()
-            .find(|cloud| cloud.id.as_deref() == Some(local.id.as_str()))
-        {
-            local.merge_cloud_metadata(cloud);
-        }
-    }
-}
-
-fn ensure_local_names(local_devices: &mut [LocalDevice]) {
-    for device in local_devices {
-        if device
-            .name
-            .as_deref()
-            .is_none_or(|name| name.trim().is_empty())
-        {
-            device.name = Some(device.id.clone());
-        }
-    }
-}
-
-fn ensure_local_access_codes(local_devices: &[LocalDevice]) -> Result<()> {
-    for device in local_devices {
-        if device
-            .access_code
-            .as_deref()
-            .is_none_or(|code| code.trim().is_empty())
-        {
-            anyhow::bail!(
+fn finalize_local_device(device: (String, LocalEndpointArg)) -> Result<LocalDevice> {
+    let (device_id, endpoint) = device;
+    let access_code = endpoint
+        .access_code
+        .as_deref()
+        .filter(|access_code| !access_code.trim().is_empty())
+        .map(str::to_owned)
+        .with_context(|| {
+            format!(
                 "--local-device `{}` is missing an access code; provide ACCESS_CODE or cloud metadata that exposes dev_access_code",
-                device.id
-            );
-        }
-    }
-    Ok(())
+                device_id
+            )
+        })?;
+    Ok(LocalDevice {
+        id: device_id,
+        endpoint: endpoint.into_endpoint(access_code),
+    })
 }
 
 fn local_device_ids(local_devices: &[LocalDevice]) -> HashSet<String> {
@@ -246,7 +387,7 @@ fn catalog_devices(
     cloud_devices: Vec<CloudDevice>,
     local_devices: &[LocalDevice],
     local_ids: &HashSet<String>,
-) -> Vec<CloudDevice> {
+) -> Vec<KnownDevice> {
     let mut devices = cloud_devices
         .into_iter()
         .filter(|device| {
@@ -255,12 +396,13 @@ fn catalog_devices(
                 .as_deref()
                 .is_none_or(|device_id| !local_ids.contains(device_id))
         })
+        .map(KnownDevice::from_cloud)
         .collect::<Vec<_>>();
-    devices.extend(local_devices.iter().map(LocalDevice::cloud_device));
+    devices.extend(local_devices.iter().map(KnownDevice::from_local));
     devices
 }
 
-fn catalog_device_ids(devices: &[CloudDevice]) -> HashSet<String> {
+fn catalog_device_ids(devices: &[KnownDevice]) -> HashSet<String> {
     devices
         .iter()
         .filter_map(|device| device.id.clone())
@@ -281,36 +423,10 @@ fn ensure_video_device_exists(
 }
 
 fn local_video_endpoint(device: &LocalDevice) -> VideoEndpoint {
-    VideoEndpoint::new(device.host.clone(), DEFAULT_VIDEO_PORT)
-}
-
-fn parse_device_config(value: &str) -> std::result::Result<DeviceConfig, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("device config must not be empty".to_owned());
-    }
-
-    let fields = value.splitn(3, ',').collect::<Vec<_>>();
-    let id = fields[0].trim();
-    if id.is_empty() {
-        return Err(format!(
-            "invalid device config `{value}`: device id is empty"
-        ));
-    }
-
-    Ok(DeviceConfig {
-        id: id.to_owned(),
-        access_code: optional_field(&fields, 1),
-        name: optional_field(&fields, 2),
-    })
-}
-
-fn optional_field(fields: &[&str], index: usize) -> Option<String> {
-    fields
-        .get(index)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+    VideoEndpoint::new(
+        Endpoint::new(device.endpoint.host.clone(), DEFAULT_VIDEO_PORT),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -318,39 +434,37 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        catalog_device_ids, catalog_devices, ensure_local_access_codes, ensure_local_names,
-        ensure_video_device_exists, local_device_ids, local_video_endpoint, merge_local_metadata,
+        catalog_device_ids, catalog_devices, ensure_video_device_exists, finalize_local_device,
+        local_device_ids, local_video_endpoint, resolve_catalog_video_access,
+        resolve_local_device_access, should_enumerate_cloud_catalog, KnownDevice,
     };
     use crate::{
         bambu::CloudDevice,
-        local::{LocalDevice, LocalDeviceConfig},
+        config::DeviceConfig,
+        local::{LocalDevice, LocalEndpointArg},
         video::VideoEndpoint,
     };
 
+    fn pending_local(id: &str, value: &str) -> (String, LocalEndpointArg) {
+        let endpoint: LocalEndpointArg = value.parse().expect("local device should parse");
+        (id.to_owned(), endpoint)
+    }
+
     fn local(id: &str, value: &str) -> LocalDevice {
-        let config: LocalDeviceConfig = value.parse().expect("local device should parse");
-        config.into_device(id.to_owned())
+        finalize_local_device(pending_local(id, value)).expect("local device should be complete")
     }
 
     fn endpoint(value: &str) -> VideoEndpoint {
         value.parse().expect("video endpoint should parse")
     }
 
-    #[test]
-    fn device_config_parser_accepts_id_only_or_metadata() {
-        let device: super::DeviceConfig = "printer-a".parse().unwrap();
-        assert_eq!(device.id, "printer-a");
-        assert_eq!(device.access_code, None);
-
-        let device: super::DeviceConfig = "printer-a,12345678,Office X1".parse().unwrap();
-        assert_eq!(device.access_code.as_deref(), Some("12345678"));
-        assert_eq!(device.name.as_deref(), Some("Office X1"));
+    fn explicit_video_endpoint(device_id: &str, value: &str) -> (String, VideoEndpoint) {
+        (device_id.to_owned(), endpoint(value))
     }
 
     #[test]
     fn catalog_uses_local_device_when_ids_overlap() {
         let local_devices = vec![local("printer-a", "192.168.1.50,12345678,Office")];
-        let local_ids = local_device_ids(&local_devices);
         let catalog = catalog_devices(
             vec![
                 CloudDevice {
@@ -366,7 +480,7 @@ mod tests {
                 },
             ],
             &local_devices,
-            &local_ids,
+            &local_device_ids(&local_devices),
         );
 
         assert_eq!(catalog.len(), 2);
@@ -378,11 +492,11 @@ mod tests {
     #[test]
     fn catalog_device_ids_ignores_devices_without_ids() {
         let ids = catalog_device_ids(&[
-            CloudDevice {
+            super::KnownDevice::from_cloud(CloudDevice {
                 id: Some("printer-a".to_owned()),
                 ..CloudDevice::default()
-            },
-            CloudDevice::default(),
+            }),
+            super::KnownDevice::from_cloud(CloudDevice::default()),
         ]);
 
         assert_eq!(ids, HashSet::from(["printer-a".to_owned()]));
@@ -395,57 +509,46 @@ mod tests {
         assert_eq!(local_video_endpoint(&device), endpoint("192.168.1.50:6000"));
     }
 
-    #[test]
-    fn missing_local_access_code_is_backfilled_from_cloud_metadata() {
-        let mut local_devices = vec![local("printer-a", "192.168.1.50,,Office")];
-        let cloud_devices = vec![CloudDevice {
-            id: Some("printer-a".to_owned()),
-            access_code: Some("12345678".to_owned()),
-            ..CloudDevice::default()
-        }];
+    #[tokio::test]
+    async fn local_device_name_defaults_to_device_id_when_missing() {
+        let mut bind_metadata = None;
+        let device = resolve_local_device_access(
+            pending_local("printer-a", "192.168.1.50,12345678"),
+            &[],
+            None,
+            &mut bind_metadata,
+        )
+        .await
+        .unwrap();
 
-        merge_local_metadata(&mut local_devices, &cloud_devices);
-
-        ensure_local_access_codes(&local_devices).unwrap();
-        assert_eq!(local_devices[0].access_code.as_deref(), Some("12345678"));
+        assert_eq!(device.endpoint.name.as_deref(), Some("printer-a"));
     }
 
-    #[test]
-    fn local_device_name_defaults_to_device_id_when_missing() {
-        let mut local_devices = vec![local("printer-a", "192.168.1.50,12345678")];
+    #[tokio::test]
+    async fn local_device_name_keeps_explicit_name() {
+        let mut bind_metadata = None;
+        let device = resolve_local_device_access(
+            pending_local("printer-a", "192.168.1.50,12345678,Office"),
+            &[],
+            None,
+            &mut bind_metadata,
+        )
+        .await
+        .unwrap();
 
-        ensure_local_names(&mut local_devices);
-
-        assert_eq!(local_devices[0].name.as_deref(), Some("printer-a"));
+        assert_eq!(device.endpoint.name.as_deref(), Some("Office"));
     }
 
-    #[test]
-    fn local_device_name_keeps_explicit_or_cloud_name() {
-        let mut local_devices = vec![
-            local("printer-a", "192.168.1.50,12345678,Office"),
-            local("printer-b", "192.168.1.51,87654321"),
-        ];
-        let cloud_devices = vec![CloudDevice {
-            id: Some("printer-b".to_owned()),
-            name: Some("Garage".to_owned()),
-            ..CloudDevice::default()
-        }];
+    #[tokio::test]
+    async fn missing_local_access_code_errors_when_no_metadata_source_exists() {
+        let local_device = pending_local("printer-a", "192.168.1.50");
+        let mut bind_metadata = None;
 
-        merge_local_metadata(&mut local_devices, &cloud_devices);
-        ensure_local_names(&mut local_devices);
+        let error = resolve_local_device_access(local_device, &[], None, &mut bind_metadata)
+            .await
+            .unwrap_err();
 
-        assert_eq!(local_devices[0].name.as_deref(), Some("Office"));
-        assert_eq!(local_devices[1].name.as_deref(), Some("Garage"));
-    }
-
-    #[test]
-    fn missing_local_access_code_errors_when_not_backfilled() {
-        let local_devices = vec![local("printer-a", "192.168.1.50")];
-
-        let error = ensure_local_access_codes(&local_devices).unwrap_err();
-
-        assert!(error.to_string().contains("printer-a"));
-        assert!(error.to_string().contains("missing an access code"));
+        assert!(error.to_string().contains("Bambu Cloud token"));
     }
 
     #[test]
@@ -463,5 +566,66 @@ mod tests {
         assert!(error
             .to_string()
             .contains("no matching cloud or local device"));
+    }
+
+    #[test]
+    fn cloud_catalog_enumeration_only_happens_when_no_devices_are_configured() {
+        assert!(should_enumerate_cloud_catalog(true, &[], &[]));
+        assert!(!should_enumerate_cloud_catalog(false, &[], &[]));
+        assert!(!should_enumerate_cloud_catalog(
+            true,
+            &[DeviceConfig {
+                id: "printer-a".to_owned(),
+            }],
+            &[]
+        ));
+        assert!(!should_enumerate_cloud_catalog(
+            true,
+            &[],
+            &[pending_local("printer-a", "192.168.1.50,12345678")]
+        ));
+    }
+
+    #[tokio::test]
+    async fn video_access_code_can_resolve_matching_local_and_catalog_devices() {
+        let video = vec![explicit_video_endpoint(
+            "printer-a",
+            "192.168.1.50,12345678",
+        )];
+        let mut bind_metadata = None;
+        let local_device = resolve_local_device_access(
+            pending_local("printer-a", "192.168.1.50"),
+            &video,
+            None,
+            &mut bind_metadata,
+        )
+        .await
+        .unwrap();
+        assert_eq!(local_device.endpoint.access_code.as_str(), "12345678");
+
+        let mut catalog = vec![KnownDevice::from_cloud(CloudDevice {
+            id: Some("printer-a".to_owned()),
+            ..CloudDevice::default()
+        })];
+        resolve_catalog_video_access(&mut catalog, &video, None, &mut bind_metadata)
+            .await
+            .unwrap();
+        assert_eq!(catalog[0].access_code.as_deref(), Some("12345678"));
+    }
+
+    #[tokio::test]
+    async fn catalog_video_access_loads_bind_only_when_code_is_missing() {
+        let video = vec![explicit_video_endpoint("printer-a", "192.168.1.50")];
+        let mut catalog = vec![KnownDevice::from_cloud(CloudDevice {
+            id: Some("printer-a".to_owned()),
+            ..CloudDevice::default()
+        })];
+        let mut bind_metadata = None;
+
+        let error = resolve_catalog_video_access(&mut catalog, &video, None, &mut bind_metadata)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Bambu Cloud token"));
     }
 }

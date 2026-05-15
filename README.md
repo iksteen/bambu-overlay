@@ -66,9 +66,7 @@ Useful commands:
 
 ```sh
 bambu-overlay serve --bind 0.0.0.0:8765
-bambu-overlay serve --no-cloud-enum --local-device 192.168.1.50,12345678,Office
 bambu-overlay serve --cloud-device 00M123456789012
-bambu-overlay serve --no-cloud-enum --cloud-device 00M123456789012,12345678,Office
 bambu-overlay serve --local-device 192.168.1.50,12345678,Office
 bambu-overlay serve --local-device 192.168.1.50
 bambu-overlay serve --local-device 192.168.1.50,12345678,Office --local-device 192.168.1.51,87654321,Garage
@@ -80,7 +78,7 @@ Configuration is handled with command-line options. Use `--help` on any command
 to see the available options. `serve` reads the access token and API base from
 the token file in cloud mode and only exposes runtime settings such as
 `--bind`, `--token-file`, `--timeout`, `--cloud-mqtt`,
-`--no-cloud-enum`, `--local-device`, `--cloud-device`, and `--video-device`.
+`--local-device`, `--cloud-device`, and `--video-device`.
 `--local-device`, `--cloud-device`, and `--video-device` can be repeated.
 
 ## Local devices
@@ -94,28 +92,26 @@ bambu-overlay serve --local-device <HOST[:MQTT_PORT]>[,<ACCESS_CODE>[,<NAME>]]
 `HOST` is the printer LAN address, and `ACCESS_CODE` is the LAN access code shown
 on the printer. Startup connects to the printer's local MQTT TLS port and uses
 the device certificate common name as the device ID before MQTT authentication.
-The MQTT port defaults to `8883`. If `ACCESS_CODE` is omitted, startup can
-backfill it from matching cloud metadata. That metadata can come from a matching
-explicit `--cloud-device`, or from Bambu Cloud `/bind` when a token is available
-and `--no-cloud-enum` is not set. Otherwise startup fails. Use an empty field
-when omitting the code but setting a name, for example
-`--local-device <HOST>,,<NAME>`. Repeat `--local-device` for multiple printers.
+The MQTT port defaults to `8883`. If `ACCESS_CODE` is omitted, startup looks up
+the matching Bambu Cloud `/bind` entry when a token is available. Otherwise
+startup fails. Use an empty field when omitting the code but setting a name, for
+example `--local-device <HOST>,,<NAME>`. Repeat
+`--local-device` for multiple printers.
 
-Hybrid mode is automatic. If a token file exists and `--no-cloud-enum` is not
-set, `serve` enumerates account devices with the Bambu Cloud `/bind` endpoint.
-Explicit `--cloud-device` entries are merged into that enumerated catalog; they
-can override the access code/name for returned devices or add extra cloud
-devices. If an explicit `--cloud-device` omits `ACCESS_CODE`, the device must be
-returned by `/bind` with `dev_access_code`; otherwise startup fails.
+Hybrid mode is automatic. `serve` calls Bambu Cloud `/bind` only when it needs
+device data from it. If a token file exists and no `--cloud-device` or
+`--local-device` is provided, `/bind` is used as the cloud device catalog. If any
+`--cloud-device <DEVICE_ID>` entry is provided, that explicit list is the
+complete cloud device catalog and `/bind` is not used for enumeration.
 
-Set `--no-cloud-enum` to skip `/bind` enumeration. In that mode,
-`--cloud-device` entries must include access codes because they cannot be
-backfilled from `/bind`. Matching explicit cloud devices can still provide
-metadata or access-code backfill for local devices. Standalone cloud devices
-still require a Bambu Cloud token for MQTT.
+`--cloud-device` entries are id-only. Standalone cloud devices still require a
+Bambu Cloud token for the MQTT UID lookup and MQTT authentication. Local devices
+with complete access codes do not trigger `/bind`; local devices missing an
+access code and explicit cloud video devices without an access code look up
+`/bind` only when that code is actually needed.
 
-To run without any Bambu Cloud API calls, set `--no-cloud-enum` and provide only
-`--local-device` entries that include access codes.
+To run without any Bambu Cloud API calls, provide only `--local-device` entries
+that include access codes.
 
 Select a local printer the same way as cloud printers:
 `http://127.0.0.1:8765/?device=<DEVICE_ID>`.
@@ -129,18 +125,19 @@ A1 and P1 series printers can expose their camera as MJPEG at
 bambu-overlay serve --video-device 192.168.1.50
 ```
 
-`--video-device` is a printer LAN IP address or hostname, optionally followed by
-`:PORT`. Repeat it once per printer when serving multiple cameras. The printer
-video server uses port `6000` when no port is specified. `serve` probes each
-explicit `--video-device` endpoint at startup, reads the device ID from the
-printer certificate common name, and fails if that device is not present in
-the known device catalog. Known devices include cloud `/bind` devices when
-enumeration is active, plus explicit `--cloud-device` and `--local-device`
-options. With `--no-cloud-enum`, only explicit devices are known. For cloud
+`--video-device` accepts a printer LAN IP address or hostname, optionally
+followed by `:PORT` and `,ACCESS_CODE`, for example
+`--video-device 192.168.1.50:6000,12345678`. Repeat it once per printer when
+serving multiple cameras. The printer video server uses port `6000` when no port
+is specified. `serve` probes each explicit
+`--video-device` endpoint at startup, reads the device ID from the printer
+certificate common name, and fails if that device is not present in the known
+device catalog. Known devices include cloud `/bind` devices when enumeration is
+active, plus explicit `--cloud-device` and `--local-device` options. For cloud
 devices, `--video-device` provides the LAN camera endpoint and the access code
-comes from `/bind` or an explicit
-`--cloud-device <DEVICE_ID>,<ACCESS_CODE>` entry. For local devices, the access
-code comes from the matching `--local-device` entry.
+can be provided on `--video-device` or come from `/bind` metadata. For local
+devices, the access code comes from the matching `--local-device` entry or
+`--video-device` entry.
 
 For local devices, `serve` probes `<HOST>:6000` at startup. If it can complete a
 Bambu device TLS handshake and the printer certificate common name matches the

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::bambu::{
-    AmsState, CloudDevice, CurrentPrintResponse, PrinterStatus, Task, TasksResponse, Tray,
+use crate::{
+    bambu::{AmsState, PrinterStatus, Tray},
+    devices::KnownDevice,
 };
 
 use super::format::{
@@ -12,25 +13,11 @@ use super::format::{
     progress_number,
 };
 
-type TaskMatches = HashMap<String, TaskMatch>;
-
-#[derive(Debug, Clone)]
-struct TaskMatch {
-    task: Task,
-    active: bool,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 enum TaskSource {
     #[default]
     #[serde(rename = "printer status")]
     PrinterStatus,
-    #[serde(rename = "printer status + task history")]
-    PrinterStatusWithTaskHistory,
-    #[serde(rename = "task history")]
-    TaskHistory,
-    #[serde(rename = "task history fallback")]
-    TaskHistoryFallback,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,7 +25,6 @@ pub(super) struct DeviceSummary {
     id: Option<String>,
     name: String,
     online: bool,
-    task_id: Option<String>,
     task_name: Option<String>,
     title: Option<String>,
     filename: Option<String>,
@@ -100,56 +86,56 @@ struct Spool {
 }
 
 struct DeviceFields<'a> {
-    device: &'a CloudDevice,
+    device: &'a KnownDevice,
     report: Option<&'a PrinterStatus>,
 }
 
 impl<'a> DeviceFields<'a> {
-    fn new(device: &'a CloudDevice, report: Option<&'a PrinterStatus>) -> Self {
+    fn new(device: &'a KnownDevice, report: Option<&'a PrinterStatus>) -> Self {
         Self { device, report }
     }
 
-    fn cloud_print(&self) -> &PrinterStatus {
+    fn catalog_status(&self) -> &PrinterStatus {
         &self.device.status
     }
 
     fn print_string(&self, pick: impl Fn(&PrinterStatus) -> Option<&String>) -> Option<String> {
         self.report
             .and_then(&pick)
-            .or_else(|| pick(self.cloud_print()))
+            .or_else(|| pick(self.catalog_status()))
             .cloned()
     }
 
     fn print_f64(&self, pick: impl Fn(&PrinterStatus) -> Option<f64>) -> Option<f64> {
         self.report
             .and_then(&pick)
-            .or_else(|| pick(self.cloud_print()))
+            .or_else(|| pick(self.catalog_status()))
     }
 
     fn print_i64(&self, pick: impl Fn(&PrinterStatus) -> Option<i64>) -> Option<i64> {
         self.report
             .and_then(&pick)
-            .or_else(|| pick(self.cloud_print()))
+            .or_else(|| pick(self.catalog_status()))
     }
 
     fn ams(&self) -> Option<&AmsState> {
         self.report
             .and_then(|print| print.ams.as_ref())
             .filter(|ams| ams.has_spool_data())
-            .or(self.cloud_print().ams.as_ref())
+            .or(self.catalog_status().ams.as_ref())
     }
 
     fn external_tray(&self) -> Option<&Tray> {
         self.report
             .and_then(|print| print.external_tray.as_ref())
             .filter(|tray| tray.has_spool_data())
-            .or(self.cloud_print().external_tray.as_ref())
+            .or(self.catalog_status().external_tray.as_ref())
     }
 
     fn display_mode(&self) -> Option<String> {
         self.report
             .and_then(print_mode)
-            .or_else(|| print_mode(self.cloud_print()))
+            .or_else(|| print_mode(self.catalog_status()))
     }
 
     fn task_id(&self) -> Option<String> {
@@ -225,7 +211,6 @@ impl<'a> DeviceFields<'a> {
                 .clone()
                 .unwrap_or_else(|| "Bambu printer".to_owned()),
             online: self.device.online.unwrap_or(true),
-            task_id,
             task_name: task_name.clone(),
             title: task_name,
             filename: self.print_string(|print| print.filename.as_ref()),
@@ -255,118 +240,23 @@ impl<'a> DeviceFields<'a> {
     }
 }
 
-struct TaskRecord<'a> {
-    task: &'a Task,
-}
-
-impl<'a> TaskRecord<'a> {
-    fn new(task: &'a Task) -> Self {
-        Self { task }
-    }
-
-    fn device_id(&self) -> Option<String> {
-        self.task.device_id.clone()
-    }
-
-    fn active(&self) -> bool {
-        let start = self
-            .task
-            .start_time
-            .as_deref()
-            .and_then(parse_bambu_datetime);
-        let end = self.task.end_time.as_deref().and_then(parse_bambu_datetime);
-        match (start, end) {
-            (None, _) => false,
-            (Some(_), None) => true,
-            (Some(start), Some(end)) if (end - start).num_seconds().abs() <= 60 => true,
-            _ => self
-                .task
-                .status
-                .as_deref()
-                .map(|status| {
-                    matches!(
-                        status.to_ascii_lowercase().as_str(),
-                        "active" | "running" | "printing"
-                    )
-                })
-                .unwrap_or(false),
-        }
-    }
-
-    fn start_sort_key(&self) -> i64 {
-        self.task
-            .start_time
-            .as_deref()
-            .and_then(parse_bambu_datetime)
-            .map(|datetime| datetime.timestamp())
-            .unwrap_or(i64::MIN)
-    }
-
-    fn summary(&self, active: bool) -> DeviceSummary {
-        let task_name = self
-            .task
-            .display_title()
-            .unwrap_or_else(|| "unknown task".to_owned());
-        DeviceSummary {
-            name: self
-                .task
-                .device_name
-                .clone()
-                .unwrap_or_else(|| "Bambu printer".to_owned()),
-            online: true,
-            task_id: self.task.id.clone(),
-            task_name: Some(task_name.clone()),
-            title: Some(task_name),
-            filename: self.task.plate_name.clone(),
-            task_status: self.task.status.clone(),
-            start_time: self.task.start_time.clone(),
-            prediction: self.task.cost_time,
-            progress: None,
-            thumbnail: self.task.cover.clone(),
-            weight: self.task.weight.clone(),
-            is_printing: active,
-            task_source: if active {
-                TaskSource::TaskHistoryFallback
-            } else {
-                TaskSource::TaskHistory
-            },
-            plate_index: self.task.plate_index.clone(),
-            ..Default::default()
-        }
-    }
-}
-
 pub(super) fn summarize_devices(
-    print_payload: &CurrentPrintResponse,
-    tasks_payload: &TasksResponse,
+    devices: &[KnownDevice],
     reports: &HashMap<String, PrinterStatus>,
 ) -> Vec<DeviceSummary> {
-    let tasks_by_device = tasks_by_device(tasks_payload);
-    print_payload
-        .devices
+    devices
         .iter()
-        .map(|device| summarize_device(device, &tasks_by_device, reports))
+        .map(|device| summarize_device(device, reports))
         .collect()
 }
 
 fn summarize_device(
-    device: &CloudDevice,
-    tasks_by_device: &TaskMatches,
+    device: &KnownDevice,
     reports: &HashMap<String, PrinterStatus>,
 ) -> DeviceSummary {
     let report = device.id.as_ref().and_then(|id| reports.get(id));
     let fields = DeviceFields::new(device, report);
     let (device_id, mut summary) = fields.summary();
-    let task_match = device_id.as_ref().and_then(|id| tasks_by_device.get(id));
-
-    if let Some(history_task) = task_match {
-        if !summary.is_printing {
-            summary = TaskRecord::new(&history_task.task).summary(history_task.active);
-            summary.id = device_id.clone();
-        } else {
-            fill_missing_from_task(&mut summary, &history_task.task);
-        }
-    }
     if summary.id.is_none() {
         summary.id = device_id;
     }
@@ -406,68 +296,6 @@ pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {
         ams_spools: device.ams_spools,
         external_spool: device.external_spool,
         thumbnail: device.thumbnail,
-    }
-}
-
-fn tasks_by_device(tasks_payload: &TasksResponse) -> TaskMatches {
-    let mut matches = tasks_payload
-        .hits
-        .iter()
-        .map(|task| {
-            let record = TaskRecord::new(task);
-            (task, record.active(), record.start_sort_key())
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(_, active, sort_key)| (*active, *sort_key));
-    matches.reverse();
-
-    let mut by_device = HashMap::new();
-    for (task, active, _) in matches {
-        let record = TaskRecord::new(task);
-        if let Some(device_id) = record.device_id() {
-            by_device.entry(device_id).or_insert(TaskMatch {
-                task: task.clone(),
-                active,
-            });
-        }
-    }
-    by_device
-}
-
-fn fill_missing_from_task(summary: &mut DeviceSummary, task: &Task) {
-    let task_summary = TaskRecord::new(task).summary(true);
-    if summary.task_id.is_none() {
-        summary.task_id = task_summary.task_id;
-    }
-    if summary.task_name.is_none() {
-        summary.task_name = task_summary.task_name;
-    }
-    if summary.title.is_none() {
-        summary.title = task_summary.title;
-    }
-    if summary.filename.is_none() {
-        summary.filename = task_summary.filename;
-    }
-    if summary.task_status.is_none() {
-        summary.task_status = task_summary.task_status;
-    }
-    if summary.start_time.is_none() {
-        summary.start_time = task_summary.start_time;
-    }
-    if summary.prediction.is_none() {
-        summary.prediction = task_summary.prediction;
-    }
-    if summary.thumbnail.is_none() {
-        summary.thumbnail = task_summary.thumbnail;
-    }
-    if summary.weight.is_none() {
-        summary.weight = task_summary.weight;
-    }
-    if summary.plate_index.is_none() {
-        summary.plate_index = task_summary.plate_index;
-    }
-    if summary.task_source == TaskSource::PrinterStatus {
-        summary.task_source = TaskSource::PrinterStatusWithTaskHistory;
     }
 }
 
@@ -562,7 +390,10 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::{json, Value};
 
-    use crate::bambu::{CurrentPrintResponse, TasksResponse, Tray};
+    use crate::{
+        bambu::{CloudDevice, Tray},
+        devices::KnownDevice,
+    };
 
     use super::{overlay_device, spool_color, summarize_devices, TaskSource};
 
@@ -570,26 +401,27 @@ mod tests {
         serde_json::from_value(value).expect("fixture should match typed API shape")
     }
 
+    fn device(value: Value) -> KnownDevice {
+        KnownDevice::from_cloud(decode::<CloudDevice>(value))
+    }
+
     #[test]
     fn summarize_devices_uses_matching_mqtt_report_fields_only() {
-        let print: CurrentPrintResponse = decode(json!({
-            "devices": [
-                {
+        let devices = vec![
+            device(json!({
                     "dev_id": "printer-a",
                     "print": {
                         "mc_percent": 12,
                         "nozzle_temper": 210
                     }
-                },
-                {
+            })),
+            device(json!({
                     "dev_id": "printer-b",
                     "print": {
                         "mc_percent": 1
                     }
-                }
-            ]
-        }));
-        let tasks = TasksResponse::default();
+            })),
+        ];
         let reports = HashMap::from([(
             "printer-a".to_owned(),
             decode(json!({
@@ -598,7 +430,7 @@ mod tests {
             })),
         )]);
 
-        let summaries = summarize_devices(&print, &tasks, &reports);
+        let summaries = summarize_devices(&devices, &reports);
         let devices = summaries
             .into_iter()
             .map(overlay_device)
@@ -612,9 +444,7 @@ mod tests {
 
     #[test]
     fn summarize_devices_keeps_cloud_spools_when_mqtt_report_is_empty() {
-        let print: CurrentPrintResponse = decode(json!({
-            "devices": [
-                {
+        let devices = vec![device(json!({
                     "dev_id": "printer-a",
                     "print": {
                         "mc_percent": 12,
@@ -638,10 +468,7 @@ mod tests {
                             "tray_color": "336699ff"
                         }
                     }
-                }
-            ]
-        }));
-        let tasks = TasksResponse::default();
+        }))];
         let reports = HashMap::from([(
             "printer-a".to_owned(),
             decode(json!({
@@ -651,7 +478,7 @@ mod tests {
             })),
         )]);
 
-        let summaries = summarize_devices(&print, &tasks, &reports);
+        let summaries = summarize_devices(&devices, &reports);
         let device = overlay_device(summaries.into_iter().next().unwrap());
 
         assert_eq!(device.progress, Some(42.0));
@@ -663,10 +490,8 @@ mod tests {
     }
 
     #[test]
-    fn summarize_devices_merges_printer_status_task_history_and_spools() {
-        let print: CurrentPrintResponse = decode(json!({
-            "devices": [
-                {
+    fn summarize_devices_uses_catalog_status_and_spools() {
+        let devices = vec![device(json!({
                     "dev_id": "printer-a",
                     "dev_name": "Office X1",
                     "dev_online": true,
@@ -694,73 +519,22 @@ mod tests {
                             ]
                         }
                     }
-                }
-            ]
-        }));
-        let tasks: TasksResponse = decode(json!({
-            "hits": [
-                {
-                    "deviceId": "printer-a",
-                    "title": "Task title",
-                    "cover": "https://example.invalid/thumb.png",
-                    "plateIndex": 2,
-                    "plateName": "Plate 2",
-                    "weight": 12.5,
-                    "startTime": "2026-05-11T00:00:00Z",
-                    "endTime": "2026-05-11T01:00:00Z",
-                    "status": "finished"
-                }
-            ]
-        }));
+        }))];
 
-        let summaries = summarize_devices(&print, &tasks, &HashMap::new());
+        let summaries = summarize_devices(&devices, &HashMap::new());
         let device = overlay_device(summaries.into_iter().next().unwrap());
 
         assert_eq!(device.name, "Office X1");
         assert_eq!(device.title.as_deref(), Some("Calibration cube"));
-        assert_eq!(device.task_source, TaskSource::PrinterStatusWithTaskHistory);
+        assert_eq!(device.task_source, TaskSource::PrinterStatus);
         assert_eq!(device.progress, Some(25.0));
         assert_eq!(device.total_print_time.as_deref(), Some("1h"));
-        assert_eq!(device.weight.as_deref(), Some("12.5g"));
-        assert_eq!(device.plate.as_deref(), Some("2"));
-        assert_eq!(
-            device.thumbnail.as_deref(),
-            Some("https://example.invalid/thumb.png")
-        );
+        assert_eq!(device.weight, None);
+        assert_eq!(device.plate, None);
+        assert_eq!(device.thumbnail, None);
         assert_eq!(device.ams_spools.len(), 1);
         assert_eq!(device.ams_spools[0].material, "PLA");
         assert_eq!(device.ams_spools[0].color, "#FF0000");
-    }
-
-    #[test]
-    fn summarize_devices_uses_active_task_history_when_printer_status_is_empty() {
-        let print: CurrentPrintResponse = decode(json!({
-            "devices": [
-                {
-                    "dev_id": "printer-a",
-                    "dev_name": "Office X1",
-                    "dev_online": true
-                }
-            ]
-        }));
-        let tasks: TasksResponse = decode(json!({
-            "hits": [
-                {
-                    "deviceId": "printer-a",
-                    "title": "Active print",
-                    "id": "task-1",
-                    "startTime": "2026-05-11T00:00:00Z",
-                    "status": "running"
-                }
-            ]
-        }));
-
-        let summaries = summarize_devices(&print, &tasks, &HashMap::new());
-        let device = overlay_device(summaries.into_iter().next().unwrap());
-
-        assert!(device.is_printing);
-        assert_eq!(device.task_name.as_deref(), Some("Active print"));
-        assert_eq!(device.task_source, TaskSource::TaskHistoryFallback);
     }
 
     #[test]

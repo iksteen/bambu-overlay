@@ -3,10 +3,7 @@ use std::{fmt, str::FromStr, time::Duration};
 use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 
-use crate::{
-    bambu::{CloudDevice, MQTT_PORT},
-    device_tls,
-};
+use crate::{bambu::MQTT_PORT, device_tls};
 
 const LOCAL_MQTT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -19,56 +16,78 @@ pub struct Endpoint {
 pub type MqttEndpoint = Endpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDevice {
-    pub id: String,
+pub struct LocalEndpoint {
     pub host: String,
-    pub mqtt_port: u16,
+    pub port: u16,
+    pub access_code: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalEndpointArg {
+    pub host: String,
+    pub port: u16,
     pub access_code: Option<String>,
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDeviceConfig {
-    pub host: String,
-    pub mqtt_port: u16,
-    pub access_code: Option<String>,
-    pub name: Option<String>,
+pub struct LocalDevice {
+    pub id: String,
+    pub endpoint: LocalEndpoint,
 }
 
-impl LocalDevice {
-    pub fn cloud_device(&self) -> CloudDevice {
-        CloudDevice {
-            id: Some(self.id.clone()),
-            name: self.name.clone(),
-            online: Some(true),
-            access_code: self.access_code.clone(),
-            ..CloudDevice::default()
+impl LocalEndpoint {
+    pub fn new(host: impl Into<String>, port: u16, access_code: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            access_code: access_code.into(),
+            name: None,
         }
     }
 
-    pub fn merge_cloud_metadata(&mut self, device: &CloudDevice) {
-        if self.name.is_none() {
-            self.name = device.name.clone();
-        }
-        if self.access_code.is_none() {
-            self.access_code = device.access_code.clone();
-        }
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint::new(self.host.clone(), self.port)
+    }
+
+    pub fn address(&self) -> String {
+        self.endpoint().to_string()
+    }
+
+    pub fn access_code(&self) -> &str {
+        self.access_code.as_str()
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 }
 
-impl LocalDeviceConfig {
-    pub fn into_device(self, id: String) -> LocalDevice {
-        LocalDevice {
-            id,
+impl LocalEndpointArg {
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint::new(self.host.clone(), self.port)
+    }
+
+    pub fn address(&self) -> String {
+        self.endpoint().to_string()
+    }
+
+    pub fn access_code(&self) -> Option<&str> {
+        self.access_code.as_deref()
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn into_endpoint(self, access_code: String) -> LocalEndpoint {
+        LocalEndpoint {
             host: self.host,
-            mqtt_port: self.mqtt_port,
-            access_code: self.access_code,
+            port: self.port,
+            access_code,
             name: self.name,
         }
-    }
-
-    pub fn mqtt_endpoint(&self) -> Endpoint {
-        Endpoint::new(self.host.clone(), self.mqtt_port)
     }
 }
 
@@ -110,28 +129,36 @@ impl fmt::Display for Endpoint {
 
 impl fmt::Display for LocalDevice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.host.contains(':') {
-            write!(formatter, "{}=[{}]:{}", self.id, self.host, self.mqtt_port)
-        } else {
-            write!(formatter, "{}={}:{}", self.id, self.host, self.mqtt_port)
-        }
+        write!(formatter, "{}={}", self.id, self.endpoint)
     }
 }
 
-impl FromStr for LocalDeviceConfig {
+impl fmt::Display for LocalEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.endpoint().fmt(formatter)
+    }
+}
+
+impl fmt::Display for LocalEndpointArg {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.endpoint().fmt(formatter)
+    }
+}
+
+impl FromStr for LocalEndpointArg {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        parse_local_device(value)
+        parse_local_device_arg(value)
     }
 }
 
-pub async fn infer_local_device_id(device: &LocalDeviceConfig) -> Result<String> {
-    let endpoint = device.mqtt_endpoint();
+pub async fn infer_local_device_id(device: &LocalEndpointArg) -> Result<String> {
+    let endpoint = device.endpoint();
     let address = endpoint.to_string();
     let tcp = tokio::time::timeout(
         LOCAL_MQTT_PROBE_TIMEOUT,
-        TcpStream::connect((device.host.as_str(), device.mqtt_port)),
+        TcpStream::connect((device.host.as_str(), device.port)),
     )
     .await
     .with_context(|| format!("timed out probing local MQTT TLS at {address}"))?
@@ -150,7 +177,7 @@ pub async fn infer_local_device_id(device: &LocalDeviceConfig) -> Result<String>
         .with_context(|| format!("local MQTT certificate at {address} did not include a device ID"))
 }
 
-fn parse_local_device(value: &str) -> std::result::Result<LocalDeviceConfig, String> {
+fn parse_local_device_arg(value: &str) -> std::result::Result<LocalEndpointArg, String> {
     let value = value.trim();
     if value.is_empty() {
         return Err("local device must not be empty".to_owned());
@@ -161,37 +188,50 @@ fn parse_local_device(value: &str) -> std::result::Result<LocalDeviceConfig, Str
         ));
     }
 
+    parse_local_endpoint_arg(value, "local device", MQTT_PORT)
+}
+
+pub(crate) fn parse_local_endpoint_arg(
+    value: &str,
+    label: &str,
+    default_port: u16,
+) -> std::result::Result<LocalEndpointArg, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+
     let fields = value.splitn(3, ',').collect::<Vec<_>>();
-    if fields.is_empty() {
-        return Err(local_device_format_error(value));
-    }
+    let parsed = parse_endpoint(fields[0].trim(), value, label, default_port)?;
+    let access_code = parse_access_code_arg(fields.get(1).copied(), label, value)?;
+    let name = optional_field(&fields, 2);
 
-    let endpoint = parse_endpoint(fields[0].trim(), value, "local device", MQTT_PORT)?;
-    let access_code = optional_field(&fields, 1);
-    if access_code
-        .as_deref()
-        .is_some_and(|access_code| !access_code.is_ascii())
-    {
-        return Err(format!(
-            "invalid local device `{value}`: access code must be ASCII"
-        ));
-    }
-    let name = fields
-        .get(2)
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned);
-
-    Ok(LocalDeviceConfig {
-        host: endpoint.host,
-        mqtt_port: endpoint.port,
+    Ok(LocalEndpointArg {
+        host: parsed.host,
+        port: parsed.port,
         access_code,
         name,
     })
 }
 
-fn local_device_format_error(value: &str) -> String {
-    format!("invalid local device `{value}`: expected HOST[:PORT][,ACCESS_CODE[,NAME]]")
+pub(crate) fn parse_access_code_arg(
+    access_code: Option<&str>,
+    label: &str,
+    value: &str,
+) -> std::result::Result<Option<String>, String> {
+    let access_code = access_code
+        .map(str::trim)
+        .filter(|access_code| !access_code.is_empty())
+        .map(str::to_owned);
+    if access_code
+        .as_deref()
+        .is_some_and(|access_code| !access_code.is_ascii())
+    {
+        return Err(format!(
+            "invalid {label} `{value}`: access code must be ASCII"
+        ));
+    }
+    Ok(access_code)
 }
 
 fn optional_field(fields: &[&str], index: usize) -> Option<String> {
@@ -262,40 +302,40 @@ fn parse_port(port: &str, value: &str, label: &str) -> std::result::Result<u16, 
 
 #[cfg(test)]
 mod tests {
-    use super::LocalDeviceConfig;
+    use super::LocalEndpointArg;
 
-    fn local_device_config(value: &str) -> LocalDeviceConfig {
-        value.parse().expect("local device config should parse")
+    fn local_device_arg(value: &str) -> LocalEndpointArg {
+        value.parse().expect("local device arg should parse")
     }
 
     #[test]
     fn local_device_parser_accepts_default_mqtt_port() {
-        let device = local_device_config("192.168.1.50,12345678,Office X1");
+        let device = local_device_arg("192.168.1.50,12345678,Office X1");
 
         assert_eq!(device.host, "192.168.1.50");
-        assert_eq!(device.mqtt_port, 8883);
+        assert_eq!(device.port, 8883);
         assert_eq!(device.access_code.as_deref(), Some("12345678"));
         assert_eq!(device.name.as_deref(), Some("Office X1"));
     }
 
     #[test]
     fn local_device_parser_accepts_custom_port() {
-        let device = local_device_config("printer.local:18883,12345678");
+        let device = local_device_arg("printer.local:18883,12345678");
 
         assert_eq!(device.host, "printer.local");
-        assert_eq!(device.mqtt_port, 18883);
+        assert_eq!(device.port, 18883);
         assert_eq!(device.name, None);
     }
 
     #[test]
     fn local_device_parser_accepts_missing_access_code() {
-        let device = local_device_config("printer.local");
+        let device = local_device_arg("printer.local");
 
         assert_eq!(device.host, "printer.local");
         assert_eq!(device.access_code, None);
         assert_eq!(device.name, None);
 
-        let device = local_device_config("printer.local,,Office X1");
+        let device = local_device_arg("printer.local,,Office X1");
 
         assert_eq!(device.access_code, None);
         assert_eq!(device.name.as_deref(), Some("Office X1"));
@@ -303,16 +343,16 @@ mod tests {
 
     #[test]
     fn local_device_parser_accepts_bracketed_ipv6() {
-        let device = local_device_config("[fe80::1]:18883,12345678");
+        let device = local_device_arg("[fe80::1]:18883,12345678");
 
         assert_eq!(device.host, "fe80::1");
-        assert_eq!(device.mqtt_port, 18883);
+        assert_eq!(device.port, 18883);
     }
 
     #[test]
     fn local_device_parser_rejects_device_id_prefix() {
         let error = "printer-a=printer.local:18883,12345678"
-            .parse::<LocalDeviceConfig>()
+            .parse::<LocalEndpointArg>()
             .unwrap_err();
 
         assert!(error.contains("DEVICE_ID= prefix is not supported"));
@@ -320,10 +360,10 @@ mod tests {
 
     #[test]
     fn local_device_config_accepts_host_only_form() {
-        let device = local_device_config("printer.local:18883,12345678,Office X1");
+        let device = local_device_arg("printer.local:18883,12345678,Office X1");
 
         assert_eq!(device.host, "printer.local");
-        assert_eq!(device.mqtt_port, 18883);
+        assert_eq!(device.port, 18883);
         assert_eq!(device.access_code.as_deref(), Some("12345678"));
         assert_eq!(device.name.as_deref(), Some("Office X1"));
     }

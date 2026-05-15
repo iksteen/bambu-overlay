@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client, Method};
 use serde::{de::DeserializeOwned, Serialize};
+use tracing::debug;
 
 use super::{
     error::{api_error_message, response_body_is_error, ApiStatus},
@@ -75,16 +76,18 @@ impl BambuClient {
         limit: usize,
         device_id: Option<&str>,
     ) -> Result<TasksResponse> {
+        let path = "/v1/user-service/my/tasks";
+        let method = Method::GET;
         let mut request = self
             .client
-            .request(Method::GET, self.url("/v1/user-service/my/tasks"))
+            .request(method.clone(), self.url(path))
             .bearer_auth(access_token)
             .timeout(self.timeout)
             .query(&[("limit", limit.to_string())]);
         if let Some(device_id) = device_id {
             request = request.query(&[("deviceId", device_id)]);
         }
-        parse_response(request.send().await.context("request failed")?).await
+        send_and_parse(request, &method, path).await
     }
 
     pub async fn user_preference(&self, access_token: &str) -> Result<UserPreference> {
@@ -107,7 +110,7 @@ impl BambuClient {
     {
         let mut request = self
             .client
-            .request(method, self.url(path))
+            .request(method.clone(), self.url(path))
             .timeout(self.timeout);
         if let Some(token) = access_token {
             request = request.bearer_auth(token);
@@ -115,7 +118,7 @@ impl BambuClient {
         if path == "/v1/iot-service/api/user/print" {
             request = request.query(&[("force", "true")]);
         }
-        parse_response(request.send().await.context("request failed")?).await
+        send_and_parse(request, &method, path).await
     }
 
     async fn request_json_with_body<T, B>(
@@ -131,13 +134,13 @@ impl BambuClient {
     {
         let mut request = self
             .client
-            .request(method, self.url(path))
+            .request(method.clone(), self.url(path))
             .timeout(self.timeout)
             .json(body);
         if let Some(token) = access_token {
             request = request.bearer_auth(token);
         }
-        parse_response(request.send().await.context("request failed")?).await
+        send_and_parse(request, &method, path).await
     }
 
     fn url(&self, path: &str) -> String {
@@ -147,6 +150,28 @@ impl BambuClient {
             path.trim_start_matches('/')
         )
     }
+}
+
+async fn send_and_parse<T>(
+    request: reqwest::RequestBuilder,
+    method: &Method,
+    path: &str,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("request to Bambu API {method} {path} failed"))?;
+    let status = response.status();
+    debug!(
+        method = %method,
+        endpoint = %path,
+        status = status.as_u16(),
+        "Bambu API endpoint called"
+    );
+    parse_response(response).await
 }
 
 async fn parse_response<T>(response: reqwest::Response) -> Result<T>

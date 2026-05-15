@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bambu;
 pub mod cli;
 pub(crate) mod cloud;
+pub mod config;
 pub(crate) mod device_tls;
 pub(crate) mod devices;
 pub mod local;

@@ -20,7 +20,11 @@ use tokio::{
 use tokio_native_tls::TlsConnector;
 use tracing::{info, warn};
 
-use crate::{bambu::CloudDevice, device_tls, local::Endpoint};
+use crate::{
+    device_tls,
+    devices::KnownDevice,
+    local::{parse_access_code_arg, Endpoint},
+};
 
 pub const DEFAULT_VIDEO_PORT: u16 = 6000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,26 +35,32 @@ const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const MJPEG_BOUNDARY: &str = "frame";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct VideoEndpoint {
-    host: String,
-    port: u16,
+    endpoint: Endpoint,
+    access_code: Option<String>,
 }
 
 impl VideoEndpoint {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
+    pub fn new(endpoint: Endpoint, access_code: Option<String>) -> Self {
         Self {
-            host: host.into(),
-            port,
+            endpoint,
+            access_code,
         }
     }
 
     fn address(&self) -> String {
-        if self.host.contains(':') {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
+        self.endpoint.to_string()
+    }
+
+    pub(crate) fn access_code(&self) -> Option<&str> {
+        self.access_code.as_deref()
+    }
+}
+
+impl PartialEq for VideoEndpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint
     }
 }
 
@@ -64,9 +74,27 @@ impl FromStr for VideoEndpoint {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let endpoint = Endpoint::parse_with_default(value, "video endpoint", DEFAULT_VIDEO_PORT)?;
-        Ok(Self::new(endpoint.host, endpoint.port))
+        parse_video_endpoint(value)
     }
+}
+
+fn parse_video_endpoint(value: &str) -> std::result::Result<VideoEndpoint, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("video endpoint must not be empty".to_owned());
+    }
+
+    let fields = value.splitn(3, ',').collect::<Vec<_>>();
+    if fields.len() > 2 {
+        return Err(format!(
+            "invalid video endpoint `{value}`: expected HOST[:PORT][,ACCESS_CODE]"
+        ));
+    }
+
+    let endpoint =
+        Endpoint::parse_with_default(fields[0].trim(), "video endpoint", DEFAULT_VIDEO_PORT)?;
+    let access_code = parse_access_code_arg(fields.get(1).copied(), "video endpoint", value)?;
+    Ok(VideoEndpoint::new(endpoint, access_code))
 }
 
 #[derive(Clone)]
@@ -75,7 +103,7 @@ pub struct VideoRuntime {
 }
 
 struct VideoRuntimeInner {
-    devices: Vec<CloudDevice>,
+    devices: Vec<KnownDevice>,
     endpoints: Vec<VideoEndpoint>,
     tls: TlsConnector,
     streams: Mutex<HashMap<String, Arc<VideoStream>>>,
@@ -122,8 +150,8 @@ pub fn mjpeg_part(frame: &[u8]) -> Bytes {
 }
 
 impl VideoRuntime {
-    pub fn new(
-        devices: Vec<CloudDevice>,
+    pub(crate) fn new(
+        devices: Vec<KnownDevice>,
         endpoints: Vec<VideoEndpoint>,
         endpoint_map: HashMap<String, VideoEndpoint>,
     ) -> Result<Self> {
@@ -208,7 +236,7 @@ pub async fn probe_video_endpoint(device_id: &str, endpoint: &VideoEndpoint) -> 
     let address = endpoint.address();
     let tcp = tokio::time::timeout(
         VIDEO_PROBE_TIMEOUT,
-        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
     )
     .await
     .with_context(|| format!("timed out probing video server at {address}"))?
@@ -233,7 +261,7 @@ pub async fn infer_video_device_id(endpoint: &VideoEndpoint) -> Result<String> {
     let address = endpoint.address();
     let tcp = tokio::time::timeout(
         VIDEO_PROBE_TIMEOUT,
-        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
     )
     .await
     .with_context(|| format!("timed out probing video server at {address}"))?
@@ -242,7 +270,7 @@ pub async fn infer_video_device_id(endpoint: &VideoEndpoint) -> Result<String> {
     let tls = device_tls::tokio_connector()?;
     let socket = tokio::time::timeout(
         VIDEO_PROBE_TIMEOUT,
-        tls.connect(endpoint.host.as_str(), tcp),
+        tls.connect(endpoint.endpoint.host.as_str(), tcp),
     )
     .await
     .with_context(|| format!("timed out probing video TLS at {address}"))?
@@ -329,7 +357,7 @@ async fn stream_endpoint_once(
 
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
     )
     .await
     .with_context(|| format!("timed out connecting to video server at {address}"))?
@@ -437,7 +465,7 @@ async fn resolve_session(
 }
 
 fn select_session(
-    devices: Vec<CloudDevice>,
+    devices: Vec<KnownDevice>,
     requested_device_id: Option<&str>,
 ) -> Result<VideoSession> {
     let requested_device_id = requested_device_id
@@ -452,7 +480,7 @@ fn select_session(
                 .map(str::trim)
                 .is_some_and(|device_id| device_id == requested_device_id)
         }) else {
-            bail!("device `{requested_device_id}` was not returned by Bambu Cloud");
+            bail!("device `{requested_device_id}` is not known");
         };
         return video_session(device).with_context(|| {
             format!("device `{requested_device_id}` did not include dev_access_code")
@@ -460,12 +488,12 @@ fn select_session(
     }
 
     let Some(device) = devices.into_iter().next() else {
-        bail!("no devices were returned by Bambu Cloud");
+        bail!("no devices are known");
     };
     video_session(device).context("first device did not include dev_access_code")
 }
 
-fn video_session(device: CloudDevice) -> Option<VideoSession> {
+fn video_session(device: KnownDevice) -> Option<VideoSession> {
     let device_id = device.id?.trim().to_owned();
     let access_code = device.access_code?.trim().to_owned();
     if device_id.is_empty() || access_code.is_empty() {
@@ -553,10 +581,10 @@ mod tests {
     use serde_json::json;
 
     use super::{auth_packet, is_jpeg, mjpeg_part, order_endpoints, select_session, VideoEndpoint};
-    use crate::bambu::CloudDevice;
+    use crate::{bambu::CloudDevice, devices::KnownDevice};
 
-    fn device(value: serde_json::Value) -> CloudDevice {
-        serde_json::from_value(value).expect("device should deserialize")
+    fn device(value: serde_json::Value) -> KnownDevice {
+        KnownDevice::from_cloud(serde_json::from_value::<CloudDevice>(value).unwrap())
     }
 
     fn endpoint(value: &str) -> VideoEndpoint {
@@ -645,8 +673,8 @@ mod tests {
     fn video_endpoint_parser_defaults_to_port_6000() {
         let endpoint = endpoint("192.168.1.50");
 
-        assert_eq!(endpoint.host, "192.168.1.50");
-        assert_eq!(endpoint.port, 6000);
+        assert_eq!(endpoint.endpoint.host, "192.168.1.50");
+        assert_eq!(endpoint.endpoint.port, 6000);
         assert_eq!(endpoint.to_string(), "192.168.1.50:6000");
     }
 
@@ -654,17 +682,34 @@ mod tests {
     fn video_endpoint_parser_accepts_custom_port() {
         let endpoint = endpoint("printer.local:6001");
 
-        assert_eq!(endpoint.host, "printer.local");
-        assert_eq!(endpoint.port, 6001);
+        assert_eq!(endpoint.endpoint.host, "printer.local");
+        assert_eq!(endpoint.endpoint.port, 6001);
         assert_eq!(endpoint.to_string(), "printer.local:6001");
+    }
+
+    #[test]
+    fn video_endpoint_parser_accepts_access_code_without_displaying_it() {
+        let endpoint = endpoint("printer.local:6001,12345678");
+
+        assert_eq!(endpoint.endpoint.host, "printer.local");
+        assert_eq!(endpoint.endpoint.port, 6001);
+        assert_eq!(endpoint.access_code(), Some("12345678"));
+        assert_eq!(endpoint.to_string(), "printer.local:6001");
+    }
+
+    #[test]
+    fn video_endpoint_parser_rejects_name_metadata() {
+        let error = VideoEndpoint::from_str("printer.local:6001,12345678,Office").unwrap_err();
+
+        assert!(error.contains("HOST[:PORT][,ACCESS_CODE]"));
     }
 
     #[test]
     fn video_endpoint_parser_accepts_bracketed_ipv6_with_port() {
         let endpoint = endpoint("[fe80::1]:6002");
 
-        assert_eq!(endpoint.host, "fe80::1");
-        assert_eq!(endpoint.port, 6002);
+        assert_eq!(endpoint.endpoint.host, "fe80::1");
+        assert_eq!(endpoint.endpoint.port, 6002);
         assert_eq!(endpoint.to_string(), "[fe80::1]:6002");
     }
 
@@ -672,8 +717,8 @@ mod tests {
     fn video_endpoint_parser_keeps_unbracketed_ipv6_on_default_port() {
         let endpoint = endpoint("fe80::1");
 
-        assert_eq!(endpoint.host, "fe80::1");
-        assert_eq!(endpoint.port, 6000);
+        assert_eq!(endpoint.endpoint.host, "fe80::1");
+        assert_eq!(endpoint.endpoint.port, 6000);
         assert_eq!(endpoint.to_string(), "[fe80::1]:6000");
     }
 

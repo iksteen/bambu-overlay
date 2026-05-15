@@ -21,16 +21,19 @@ use tracing::{info, warn};
 
 use crate::{
     assets,
-    bambu::{CloudDevice, MQTT_HOST, MQTT_PORT},
+    bambu::{MQTT_HOST, MQTT_PORT},
     cloud::{cloud_mqtt_startup, start_cloud_mqtt},
-    devices::{resolve_devices, resolve_video_endpoints, ResolvedDevices, ResolvedVideoEndpoints},
-    local::{Endpoint, LocalDeviceConfig, MqttEndpoint},
+    devices::{
+        resolve_devices, resolve_video_endpoints, DeviceSource, KnownDevice, ResolvedDevices,
+        ResolvedVideoEndpoints,
+    },
+    local::{Endpoint, LocalEndpointArg, MqttEndpoint},
     mqtt::{start_local_supervisors, MqttRuntime},
     overlay::{error_payload, SnapshotService},
     video::{mjpeg_content_type, VideoEndpoint, VideoRuntime},
 };
 
-pub use crate::{cloud::CloudSession, devices::DeviceConfig};
+pub use crate::{cloud::CloudSession, config::DeviceConfig};
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8765;
@@ -39,8 +42,7 @@ pub const DEFAULT_PORT: u16 = 8765;
 pub struct ServerConfig {
     pub bind: Endpoint,
     pub cloud_mqtt: MqttEndpoint,
-    pub no_cloud_enum: bool,
-    pub local_devices: Vec<LocalDeviceConfig>,
+    pub local_devices: Vec<LocalEndpointArg>,
     pub cloud_devices: Vec<DeviceConfig>,
     pub video_endpoints: Vec<VideoEndpoint>,
 }
@@ -50,7 +52,6 @@ impl Default for ServerConfig {
         Self {
             bind: Endpoint::new(DEFAULT_HOST, DEFAULT_PORT),
             cloud_mqtt: MqttEndpoint::new(MQTT_HOST, MQTT_PORT),
-            no_cloud_enum: false,
             local_devices: Vec::new(),
             cloud_devices: Vec::new(),
             video_endpoints: Vec::new(),
@@ -73,8 +74,7 @@ struct DeviceQuery {
 
 #[derive(Clone)]
 struct KnownDevices {
-    devices: Vec<CloudDevice>,
-    local_ids: HashSet<String>,
+    devices: Vec<KnownDevice>,
     probed_video_ids: HashSet<String>,
 }
 
@@ -103,25 +103,18 @@ struct KnownDevicePaths {
     video: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum DeviceSource {
-    Cloud,
-    Local,
-}
-
 pub async fn serve(cloud: Option<CloudSession>, config: ServerConfig) -> Result<()> {
     let mqtt = MqttRuntime::new();
     let devices = resolve_devices(
         cloud.as_ref(),
         &config.cloud_devices,
         &config.local_devices,
-        config.no_cloud_enum,
+        &config.video_endpoints,
     )
     .await?;
     let cloud_mqtt =
         cloud_mqtt_startup(cloud.as_ref(), &config.cloud_mqtt, &devices.cloud_mqtt_ids).await?;
-    let video = resolve_video_endpoints(&config.video_endpoints, &devices).await?;
+    let video = resolve_video_endpoints(&devices).await?;
     let state = app_state(mqtt.clone(), &devices, video)?;
 
     start_cloud_mqtt(mqtt.clone(), cloud_mqtt);
@@ -161,7 +154,6 @@ fn app_state(
 ) -> Result<AppState> {
     let known_devices = KnownDevices {
         devices: devices.catalog.clone(),
-        local_ids: devices.local_ids.clone(),
         probed_video_ids: video_endpoints.probed_device_ids.clone(),
     };
     let snapshot = SnapshotService::new(devices.catalog.clone(), mqtt.clone());
@@ -192,15 +184,12 @@ impl KnownDevices {
 
     fn device(
         &self,
-        device: &CloudDevice,
+        device: &KnownDevice,
         runtime_video_ids: &HashSet<String>,
     ) -> KnownDevicePayload {
         let id = device.id.clone();
-        let source = match id.as_deref() {
-            Some(id) if self.local_ids.contains(id) => DeviceSource::Local,
-            _ => DeviceSource::Cloud,
-        };
-        let has_access_code = device.access_code.as_deref().is_some_and(has_text);
+        let source = device.source.clone();
+        let has_access_code = device.has_access_code();
         let has_video = id
             .as_deref()
             .is_some_and(|id| self.probed_video_ids.contains(id) || runtime_video_ids.contains(id));
@@ -256,10 +245,6 @@ fn hex(nibble: u8) -> char {
         10..=15 => (b'A' + nibble - 10) as char,
         _ => unreachable!("nibble must be four bits"),
     }
-}
-
-fn has_text(value: &str) -> bool {
-    !value.trim().is_empty()
 }
 
 async fn horizontal_overlay() -> Result<Html<String>, Response> {
@@ -402,28 +387,32 @@ mod tests {
     use std::collections::HashSet;
 
     use super::KnownDevices;
-    use crate::bambu::CloudDevice;
+    use crate::{
+        bambu::PrinterStatus,
+        devices::{DeviceSource, KnownDevice},
+    };
 
     #[test]
     fn known_devices_payload_includes_paths_without_access_codes() {
         let devices = KnownDevices {
             devices: vec![
-                CloudDevice {
+                KnownDevice {
                     id: Some("printer a/1".to_owned()),
                     name: Some("Office".to_owned()),
                     online: Some(true),
                     access_code: Some("12345678".to_owned()),
-                    ..CloudDevice::default()
+                    status: PrinterStatus::default(),
+                    source: DeviceSource::Local,
                 },
-                CloudDevice {
+                KnownDevice {
                     id: Some("printer-b".to_owned()),
                     name: Some("Garage".to_owned()),
                     online: Some(false),
                     access_code: Some("87654321".to_owned()),
-                    ..CloudDevice::default()
+                    status: PrinterStatus::default(),
+                    source: DeviceSource::Cloud,
                 },
             ],
-            local_ids: HashSet::from(["printer a/1".to_owned()]),
             probed_video_ids: HashSet::from(["printer a/1".to_owned()]),
         };
 
