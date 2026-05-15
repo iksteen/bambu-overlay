@@ -6,9 +6,10 @@ use clap::{Args, Parser, Subcommand};
 use crate::{
     auth::{default_token_path, load_token, save_token},
     bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST},
-    local::{CloudDeviceConfig, Endpoint, LocalDeviceConfig, MqttEndpoint},
+    cloud::CloudSession,
+    local::{Endpoint, LocalDeviceConfig, MqttEndpoint},
     video::VideoEndpoint,
-    web::{serve, CloudSession, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
+    web::{serve, DeviceConfig, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
 };
 
 #[derive(Parser)]
@@ -122,7 +123,7 @@ struct ServeArgs {
         help = "Explicit Bambu Cloud MQTT device; repeat to add or override devices. Does not disable /bind enumeration; use --no-cloud-enum for that",
         help_heading = "Cloud"
     )]
-    cloud_devices: Vec<CloudDeviceConfig>,
+    cloud_devices: Vec<DeviceConfig>,
     #[arg(
         long = "local-device",
         value_name = "HOST[:PORT][,ACCESS_CODE[,NAME]]",
@@ -213,7 +214,7 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
     serve(cloud, config).await
 }
 
-fn validate_devices(cloud_devices: &[CloudDeviceConfig]) -> Result<()> {
+fn validate_devices(cloud_devices: &[DeviceConfig]) -> Result<()> {
     let mut seen = HashSet::new();
     for device in cloud_devices {
         if !seen.insert(device.id.as_str()) {

@@ -5,7 +5,8 @@ use tracing::{error, warn};
 
 use crate::{
     bambu::{BambuClient, CloudDevice},
-    local::{CloudDeviceConfig, MqttEndpoint},
+    devices::DeviceConfig,
+    local::MqttEndpoint,
     mqtt::{supervise, MqttRuntime},
 };
 
@@ -31,7 +32,7 @@ pub(crate) struct CloudMqttStartup {
 
 pub(crate) async fn cloud_devices(
     cloud: Option<&CloudSession>,
-    configs: &[CloudDeviceConfig],
+    configs: &[DeviceConfig],
     no_cloud_enum: bool,
 ) -> Result<CloudDevices> {
     let bound = if enumerate_cloud_catalog(no_cloud_enum) {
@@ -115,7 +116,7 @@ pub(crate) fn start_cloud_mqtt(runtime: MqttRuntime, startup: Option<CloudMqttSt
 }
 
 fn explicit_cloud_devices(
-    configs: &[CloudDeviceConfig],
+    configs: &[DeviceConfig],
     bound: &[CloudDevice],
     no_cloud_enum: bool,
 ) -> Result<Vec<CloudDevice>> {
@@ -126,7 +127,7 @@ fn explicit_cloud_devices(
 }
 
 fn explicit_cloud_device(
-    config: &CloudDeviceConfig,
+    config: &DeviceConfig,
     bound: &[CloudDevice],
     no_cloud_enum: bool,
 ) -> Result<CloudDevice> {
@@ -219,10 +220,7 @@ mod tests {
         cloud_devices, cloud_mqtt_startup, enumerate_cloud_catalog, explicit_cloud_devices,
         merge_cloud_catalog,
     };
-    use crate::{
-        bambu::CloudDevice,
-        local::{CloudDeviceConfig, MqttEndpoint},
-    };
+    use crate::{bambu::CloudDevice, devices::DeviceConfig, local::MqttEndpoint};
 
     fn mqtt_endpoint(value: &str) -> MqttEndpoint {
         value.parse().expect("MQTT endpoint should parse")
@@ -257,7 +255,7 @@ mod tests {
     async fn explicit_cloud_devices_do_not_require_cloud_session_for_catalog() {
         let devices = cloud_devices(
             None,
-            &[CloudDeviceConfig {
+            &[DeviceConfig {
                 id: "printer-a".to_owned(),
                 access_code: Some("12345678".to_owned()),
                 name: Some("Office".to_owned()),
@@ -284,7 +282,7 @@ mod tests {
     async fn cloud_device_without_access_code_errors_when_cloud_enum_is_disabled() {
         let error = cloud_devices(
             None,
-            &[CloudDeviceConfig {
+            &[DeviceConfig {
                 id: "printer-a".to_owned(),
                 access_code: None,
                 name: None,
@@ -303,7 +301,7 @@ mod tests {
     async fn cloud_device_without_access_code_errors_when_not_found_by_cloud_enum() {
         let error = cloud_devices(
             None,
-            &[CloudDeviceConfig {
+            &[DeviceConfig {
                 id: "printer-a".to_owned(),
                 access_code: None,
                 name: None,
@@ -322,7 +320,7 @@ mod tests {
     #[test]
     fn cloud_device_without_access_code_can_be_backfilled_from_cloud_enum() {
         let devices = explicit_cloud_devices(
-            &[CloudDeviceConfig {
+            &[DeviceConfig {
                 id: "printer-a".to_owned(),
                 access_code: None,
                 name: None,

@@ -4,7 +4,7 @@ pub mod bambu;
 pub mod cli;
 pub(crate) mod cloud;
 pub(crate) mod device_tls;
-pub mod devices;
+pub(crate) mod devices;
 pub mod local;
 pub mod mqtt;
 pub mod overlay;

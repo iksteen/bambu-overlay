@@ -39,7 +39,7 @@ impl SnapshotService {
         Self { devices, mqtt }
     }
 
-    pub async fn payload(&self, _force_cloud_refresh: bool) -> Result<OverlayPayload> {
+    pub async fn payload(&self) -> Result<OverlayPayload> {
         let current_print = CurrentPrintResponse {
             devices: self.devices.clone(),
         };

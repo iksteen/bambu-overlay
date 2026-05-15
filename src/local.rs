@@ -90,33 +90,6 @@ impl Endpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudDeviceConfig {
-    pub id: String,
-    pub access_code: Option<String>,
-    pub name: Option<String>,
-}
-
-impl CloudDeviceConfig {
-    pub fn cloud_device(&self) -> CloudDevice {
-        CloudDevice {
-            id: Some(self.id.clone()),
-            name: self.name.clone(),
-            online: Some(true),
-            access_code: self.access_code.clone(),
-            ..CloudDevice::default()
-        }
-    }
-}
-
-impl FromStr for CloudDeviceConfig {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        parse_cloud_device(value)
-    }
-}
-
 impl FromStr for Endpoint {
     type Err = String;
 
@@ -142,12 +115,6 @@ impl fmt::Display for LocalDevice {
         } else {
             write!(formatter, "{}={}:{}", self.id, self.host, self.mqtt_port)
         }
-    }
-}
-
-impl fmt::Display for CloudDeviceConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.id)
     }
 }
 
@@ -225,27 +192,6 @@ fn parse_local_device(value: &str) -> std::result::Result<LocalDeviceConfig, Str
 
 fn local_device_format_error(value: &str) -> String {
     format!("invalid local device `{value}`: expected HOST[:PORT][,ACCESS_CODE[,NAME]]")
-}
-
-fn parse_cloud_device(value: &str) -> std::result::Result<CloudDeviceConfig, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("cloud device must not be empty".to_owned());
-    }
-
-    let fields = value.splitn(3, ',').collect::<Vec<_>>();
-    let id = fields[0].trim();
-    if id.is_empty() {
-        return Err(format!(
-            "invalid cloud device `{value}`: device id is empty"
-        ));
-    }
-
-    Ok(CloudDeviceConfig {
-        id: id.to_owned(),
-        access_code: optional_field(&fields, 1),
-        name: optional_field(&fields, 2),
-    })
 }
 
 fn optional_field(fields: &[&str], index: usize) -> Option<String> {
@@ -378,17 +324,6 @@ mod tests {
 
         assert_eq!(device.host, "printer.local");
         assert_eq!(device.mqtt_port, 18883);
-        assert_eq!(device.access_code.as_deref(), Some("12345678"));
-        assert_eq!(device.name.as_deref(), Some("Office X1"));
-    }
-
-    #[test]
-    fn cloud_device_parser_accepts_id_only_or_metadata() {
-        let device: super::CloudDeviceConfig = "printer-a".parse().unwrap();
-        assert_eq!(device.id, "printer-a");
-        assert_eq!(device.access_code, None);
-
-        let device: super::CloudDeviceConfig = "printer-a,12345678,Office X1".parse().unwrap();
         assert_eq!(device.access_code.as_deref(), Some("12345678"));
         assert_eq!(device.name.as_deref(), Some("Office X1"));
     }
