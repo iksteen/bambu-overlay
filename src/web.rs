@@ -112,7 +112,7 @@ pub async fn serve(cloud: Option<CloudSession>, config: ServerConfig) -> Result<
     )
     .await?;
     let cloud_mqtt =
-        cloud_mqtt_startup(cloud.as_ref(), &config.cloud_mqtt, &devices.cloud_mqtt_ids).await?;
+        cloud_mqtt_startup(cloud.as_ref(), &config.cloud_mqtt, &devices.cloud_mqtt_ids)?;
     let video = resolve_video_endpoints(&devices).await?;
     let state = app_state(mqtt.clone(), &devices, video)?;
 

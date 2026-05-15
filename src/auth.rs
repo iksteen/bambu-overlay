@@ -15,8 +15,9 @@ static DEFAULT_TOKEN_PATH: OnceLock<PathBuf> = OnceLock::new();
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenData {
-    pub access_token: Option<String>,
+    pub access_token: String,
     pub api_base: Option<String>,
+    pub uid: String,
 }
 
 #[derive(Serialize)]
@@ -24,6 +25,7 @@ pub struct TokenData {
 struct SavedToken<'a> {
     access_token: &'a str,
     refresh_token: Option<&'a str>,
+    uid: &'a str,
     created_at: String,
     api_base: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,17 +38,22 @@ pub fn save_token(
     login_response: &LoginResponse,
     token_file: Option<PathBuf>,
     api_base: &str,
+    uid: &str,
 ) -> Result<PathBuf> {
     let access_token = login_response
         .access_token
         .as_deref()
         .filter(|token| !token.is_empty())
         .context("cannot save token: login response did not include accessToken")?;
+    let uid = (!uid.trim().is_empty())
+        .then_some(uid.trim())
+        .context("cannot save token: user preference did not include uid")?;
 
     let now = Utc::now();
     let token_data = SavedToken {
         access_token,
         refresh_token: login_response.refresh_token.as_deref(),
+        uid,
         created_at: now.to_rfc3339(),
         api_base,
         expires_in: login_response.expires_in,

@@ -11,6 +11,7 @@ use crate::{
 pub struct CloudSession {
     pub client: BambuClient,
     pub access_token: String,
+    pub user_id: String,
 }
 
 pub(crate) struct CloudMqttStartup {
@@ -44,7 +45,7 @@ fn explicit_cloud_device(device_id: &str) -> CloudDevice {
     }
 }
 
-pub(crate) async fn cloud_mqtt_startup(
+pub(crate) fn cloud_mqtt_startup(
     cloud: Option<&CloudSession>,
     endpoint: &MqttEndpoint,
     device_ids: &[String],
@@ -56,10 +57,9 @@ pub(crate) async fn cloud_mqtt_startup(
     let cloud = cloud.with_context(|| {
         "cloud MQTT devices require a Bambu Cloud token; run `bambu-overlay login` or configure the device as --local-device"
     })?;
-    let user_id = cloud_mqtt_user_id(cloud).await?;
     Ok(Some(CloudMqttStartup {
         endpoint: endpoint.clone(),
-        user_id,
+        user_id: cloud.user_id.clone(),
         access_token: cloud.access_token.clone(),
         device_ids: device_ids.to_vec(),
     }))
@@ -96,49 +96,56 @@ pub(crate) fn start_cloud_mqtt(runtime: MqttRuntime, startup: Option<CloudMqttSt
     });
 }
 
-async fn cloud_mqtt_user_id(cloud: &CloudSession) -> Result<String> {
-    let preference = cloud
-        .client
-        .user_preference(&cloud.access_token)
-        .await
-        .context("could not fetch MQTT user id from user preference")?;
-    preference
-        .mqtt_user_id()
-        .context("could not derive MQTT user id from user preference")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{bound_cloud_devices, cloud_mqtt_startup, explicit_cloud_devices};
-    use crate::local::MqttEndpoint;
+    use crate::{bambu::BambuClient, local::MqttEndpoint};
+    use std::time::Duration;
 
     fn mqtt_endpoint(value: &str) -> MqttEndpoint {
         value.parse().expect("MQTT endpoint should parse")
     }
 
-    #[tokio::test]
-    async fn cloud_mqtt_startup_skips_when_no_cloud_devices_exist() {
-        let startup = cloud_mqtt_startup(None, &mqtt_endpoint("mqtt.example.test"), &[])
-            .await
-            .unwrap();
+    fn cloud_session(user_id: &str) -> super::CloudSession {
+        super::CloudSession {
+            client: BambuClient::new("https://example.invalid", Duration::from_secs(1)).unwrap(),
+            access_token: "access-token".to_owned(),
+            user_id: user_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn cloud_mqtt_startup_skips_when_no_cloud_devices_exist() {
+        let startup = cloud_mqtt_startup(None, &mqtt_endpoint("mqtt.example.test"), &[]).unwrap();
 
         assert!(startup.is_none());
     }
 
-    #[tokio::test]
-    async fn cloud_mqtt_startup_requires_cloud_session_for_cloud_devices() {
+    #[test]
+    fn cloud_mqtt_startup_requires_cloud_session_for_cloud_devices() {
         let error = match cloud_mqtt_startup(
             None,
             &mqtt_endpoint("mqtt.example.test"),
             &["printer-a".to_owned()],
-        )
-        .await
-        {
+        ) {
             Ok(_) => panic!("cloud MQTT startup should require a cloud session"),
             Err(error) => error,
         };
 
         assert!(error.to_string().contains("Bambu Cloud token"));
+    }
+
+    #[test]
+    fn cloud_mqtt_startup_uses_stored_user_id() {
+        let startup = cloud_mqtt_startup(
+            Some(&cloud_session("1234567890")),
+            &mqtt_endpoint("mqtt.example.test"),
+            &["printer-a".to_owned()],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(startup.user_id, "1234567890");
     }
 
     #[test]

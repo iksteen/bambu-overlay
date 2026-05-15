@@ -46,8 +46,7 @@ pub(crate) async fn monitor_mqtt(cloud: Option<CloudSession>, config: MonitorCon
                 cloud.as_ref(),
                 &config.cloud_mqtt,
                 std::slice::from_ref(&device_id),
-            )
-            .await?
+            )?
             .context("cloud MQTT startup was skipped for selected cloud device")?;
             monitor_target(MqttTarget::cloud(
                 startup.endpoint,

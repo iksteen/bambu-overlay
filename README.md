@@ -77,9 +77,10 @@ bambu-overlay mqtt --local-device 192.168.1.50,12345678
 ```
 
 Configuration is handled with command-line options. Use `--help` on any command
-to see the available options. `serve` reads the access token and API base from
-the token file in cloud mode and only exposes runtime settings such as
-`--bind`, `--token-file`, `--timeout`, `--cloud-mqtt`,
+to see the available options. `login` stores the access token, API base, and
+Bambu MQTT user ID in the token file; re-run `login` if the token file predates
+the stored user ID. `serve` reads that token data in cloud mode and only exposes
+runtime settings such as `--bind`, `--token-file`, `--timeout`, `--cloud-mqtt`,
 `--local-device`, `--cloud-device`, and `--video-device`.
 `--local-device`, `--cloud-device`, and `--video-device` can be repeated.
 

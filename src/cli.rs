@@ -218,10 +218,23 @@ async fn login(args: LoginArgs) -> Result<()> {
         login_response = client.login(&account, None, Some(&code)).await?;
     }
 
+    let access_token = login_response
+        .access_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+        .context("login response did not include accessToken")?;
+    let uid = client
+        .user_preference(access_token)
+        .await
+        .context("could not fetch MQTT user id from user preference")?
+        .mqtt_user_id()
+        .context("could not derive MQTT user id from user preference")?;
+
     let token_path = save_token(
         &login_response,
         Some(args.token.token_file),
         &args.http.api_base,
+        &uid,
     )?;
     println!("Saved Bambu access token to {}", token_path.display());
     println!("Run `bambu-overlay serve` to start the overlay.");
@@ -229,8 +242,8 @@ async fn login(args: LoginArgs) -> Result<()> {
 }
 
 async fn devices_cmd(args: DevicesArgs) -> Result<()> {
-    let (client, access_token) = token_client(Some(args.token.token_file), args.timeout)?;
-    let bound_devices = client.bound_devices(&access_token).await?;
+    let cloud = token_client(Some(args.token.token_file), args.timeout)?;
+    let bound_devices = cloud.client.bound_devices(&cloud.access_token).await?;
 
     println!(
         "{:<24}  {:<32}  {:<8}  {:<12}",
@@ -278,29 +291,30 @@ fn optional_token_client(token_file: PathBuf, timeout: f64) -> Result<Option<Clo
         return Ok(None);
     }
 
-    token_client(Some(token_file), timeout).map(|(client, access_token)| {
-        Some(CloudSession {
-            client,
-            access_token,
-        })
-    })
+    token_client(Some(token_file), timeout).map(Some)
 }
 
-fn token_client(token_file: Option<PathBuf>, timeout: f64) -> Result<(BambuClient, String)> {
+fn token_client(token_file: Option<PathBuf>, timeout: f64) -> Result<CloudSession> {
     let token_data = load_token(token_file)?;
-    let access_token = token_data
-        .access_token
-        .as_deref()
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .context("cached token file does not include accessToken")?;
+    let access_token = token_data.access_token.trim();
+    if access_token.is_empty() {
+        bail!("cached token file does not include accessToken");
+    }
+    let user_id = token_data.uid.trim();
+    if user_id.is_empty() {
+        bail!("cached token file does not include uid");
+    }
     let api_base = token_data
         .api_base
         .as_deref()
         .filter(|api_base| !api_base.is_empty())
         .unwrap_or(API_BASE);
     let client = BambuClient::new(api_base, Duration::from_secs_f64(timeout))?;
-    Ok((client, access_token))
+    Ok(CloudSession {
+        client,
+        access_token: access_token.to_owned(),
+        user_id: user_id.to_owned(),
+    })
 }
 
 fn client(args: &HttpArgs) -> Result<BambuClient> {
