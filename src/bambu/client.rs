@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use bytes::{Bytes, BytesMut};
 use reqwest::{Client, Method};
 use serde::{de::DeserializeOwned, Serialize};
 use tracing::debug;
@@ -16,6 +17,11 @@ pub struct BambuClient {
     client: Client,
     api_base: String,
     timeout: Duration,
+}
+
+pub(crate) struct DownloadedBytes {
+    pub(crate) bytes: Bytes,
+    pub(crate) content_type: Option<String>,
 }
 
 impl BambuClient {
@@ -99,6 +105,45 @@ impl BambuClient {
         .await
     }
 
+    pub(crate) async fn download_bytes(
+        &self,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<DownloadedBytes> {
+        let mut response = self
+            .client
+            .get(url)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .with_context(|| format!("request to `{url}` failed"))?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        if !status.is_success() {
+            bail!("request to `{url}` returned HTTP {status}");
+        }
+        if let Some(content_length) = response.content_length() {
+            ensure_download_size(content_length, max_bytes, url)?;
+        }
+        let mut bytes = BytesMut::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .with_context(|| format!("failed to read response body from `{url}`"))?
+        {
+            ensure_download_size((bytes.len() + chunk.len()) as u64, max_bytes, url)?;
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(DownloadedBytes {
+            bytes: bytes.freeze(),
+            content_type,
+        })
+    }
+
     async fn request_json<T>(
         &self,
         method: Method,
@@ -150,6 +195,13 @@ impl BambuClient {
             path.trim_start_matches('/')
         )
     }
+}
+
+fn ensure_download_size(size: u64, max_bytes: usize, url: &str) -> Result<()> {
+    if size > max_bytes as u64 {
+        bail!("download from `{url}` exceeds maximum supported size of {max_bytes} bytes");
+    }
+    Ok(())
 }
 
 async fn send_and_parse<T>(

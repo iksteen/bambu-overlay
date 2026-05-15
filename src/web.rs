@@ -5,7 +5,7 @@ use async_stream::stream;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
@@ -30,6 +30,7 @@ use crate::{
     local::{Endpoint, LocalEndpointArg, MqttEndpoint},
     mqtt::{start_local_supervisors, MqttRuntime},
     overlay::{error_payload, SnapshotService},
+    thumbnail::ThumbnailRuntime,
     video::{mjpeg_content_type, VideoEndpoint, VideoRuntime},
 };
 
@@ -64,12 +65,14 @@ struct AppState {
     snapshot: SnapshotService,
     mqtt: MqttRuntime,
     video: VideoRuntime,
+    thumbnail: ThumbnailRuntime,
     devices: KnownDevices,
 }
 
 #[derive(Debug, Deserialize)]
 struct DeviceQuery {
     device: Option<String>,
+    task: Option<String>,
 }
 
 #[derive(Clone)]
@@ -98,6 +101,7 @@ struct KnownDevicePayload {
 struct KnownDevicePaths {
     horizontal: Option<String>,
     vertical: Option<String>,
+    thumbnail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     video: Option<String>,
 }
@@ -114,7 +118,14 @@ pub async fn serve(cloud: Option<CloudSession>, config: ServerConfig) -> Result<
     let cloud_mqtt =
         cloud_mqtt_startup(cloud.as_ref(), &config.cloud_mqtt, &devices.cloud_mqtt_ids)?;
     let video = resolve_video_endpoints(&devices).await?;
-    let state = app_state(mqtt.clone(), &devices, video)?;
+    let thumbnail = ThumbnailRuntime::new(
+        mqtt.clone(),
+        cloud.clone(),
+        devices.catalog.clone(),
+        devices.local.clone(),
+    );
+    thumbnail.start();
+    let state = app_state(mqtt.clone(), &devices, video, thumbnail)?;
 
     start_cloud_mqtt(mqtt.clone(), cloud_mqtt);
     start_local_supervisors(mqtt, devices.local);
@@ -129,6 +140,7 @@ async fn serve_http(bind: Endpoint, state: AppState) -> Result<()> {
         .route("/api/devices", get(known_devices))
         .route("/api/current-print", get(current_print))
         .route("/api/current-print/events", get(current_print_events))
+        .route("/api/thumbnail", get(thumbnail))
         .route("/api/video.mjpeg", get(video_mjpeg))
         .route("/static/{file}", get(static_asset))
         .with_state(state);
@@ -150,6 +162,7 @@ fn app_state(
     mqtt: MqttRuntime,
     devices: &ResolvedDevices,
     video_endpoints: ResolvedVideoEndpoints,
+    thumbnail: ThumbnailRuntime,
 ) -> Result<AppState> {
     let known_devices = KnownDevices {
         devices: devices.catalog.clone(),
@@ -165,6 +178,7 @@ fn app_state(
         snapshot,
         mqtt,
         video,
+        thumbnail,
         devices: known_devices,
     })
 }
@@ -205,6 +219,7 @@ fn device_paths(device_id: Option<&str>, has_video: bool) -> KnownDevicePaths {
         return KnownDevicePaths {
             horizontal: None,
             vertical: None,
+            thumbnail: None,
             video: None,
         };
     };
@@ -213,6 +228,7 @@ fn device_paths(device_id: Option<&str>, has_video: bool) -> KnownDevicePaths {
     KnownDevicePaths {
         horizontal: Some(format!("/overlay?{query}")),
         vertical: Some(format!("/vertical?{query}")),
+        thumbnail: Some(format!("/api/thumbnail?{query}")),
         video: has_video.then(|| format!("/api/video.mjpeg?{query}")),
     }
 }
@@ -263,6 +279,40 @@ async fn current_print(State(state): State<AppState>) -> Response {
 async fn known_devices(State(state): State<AppState>) -> Json<KnownDevicesPayload> {
     let runtime_video_ids = state.video.known_device_ids().await;
     Json(state.devices.payload(&runtime_video_ids))
+}
+
+async fn thumbnail(State(state): State<AppState>, Query(query): Query<DeviceQuery>) -> Response {
+    match state
+        .thumbnail
+        .thumbnail(query.device.as_deref(), query.task.as_deref())
+        .await
+    {
+        Ok(Some(image)) => {
+            let content_type = HeaderValue::from_str(&image.content_type)
+                .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                    (header::PRAGMA, HeaderValue::from_static("no-cache")),
+                ],
+                image.bytes,
+            )
+                .into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "thumbnail is not available",
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            error.to_string(),
+        )
+            .into_response(),
+    }
 }
 
 async fn current_print_events(
@@ -425,6 +475,10 @@ mod tests {
         assert_eq!(
             value["devices"][0]["paths"]["vertical"],
             "/vertical?device=printer%20a%2F1"
+        );
+        assert_eq!(
+            value["devices"][0]["paths"]["thumbnail"],
+            "/api/thumbnail?device=printer%20a%2F1"
         );
         assert_eq!(
             value["devices"][0]["paths"]["video"],

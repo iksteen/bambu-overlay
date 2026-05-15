@@ -80,6 +80,12 @@ pub struct PrinterStatus {
         deserialize_with = "de::optional_string"
     )]
     pub filename: Option<String>,
+    #[serde(
+        default,
+        rename = "print_type",
+        deserialize_with = "de::optional_string"
+    )]
+    pub print_type: Option<String>,
     #[serde(default, deserialize_with = "de::optional_string")]
     pub weight: Option<String>,
     #[serde(default, rename = "layer_num", deserialize_with = "de::optional_i64")]
@@ -134,6 +140,7 @@ impl PrinterStatus {
             prediction_seconds,
             start_time,
             filename,
+            print_type,
             weight,
             layer_current,
             layer_total,
@@ -373,6 +380,7 @@ mod tests {
             "cost_time": 100,
             "gcode_start_time": "2026-05-11T00:00:00Z",
             "gcode_file": "old.3mf",
+            "print_type": "cloud",
             "weight": "10",
             "layer_num": 1,
             "total_layer_num": 2,
@@ -391,6 +399,7 @@ mod tests {
             "cost_time": 200,
             "gcode_start_time": "2026-05-11T01:00:00Z",
             "gcode_file": "new.3mf",
+            "print_type": "local",
             "weight": "20",
             "layer_num": 3,
             "total_layer_num": 4,

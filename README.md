@@ -53,14 +53,21 @@ from the configured device list.
 
 The browser uses server-sent events from `/api/current-print/events`. The server
 emits after MQTT messages and at least once per second. While serving, the
-overlay does not poll Bambu Cloud current-print or task APIs; it builds state
-from the configured device catalog plus MQTT reports.
+overlay does not poll Bambu Cloud current-print APIs; it builds status from the
+configured device catalog plus MQTT reports. Thumbnail refreshes are triggered
+by MQTT task changes.
 
 The current device catalog is available as JSON at `/api/devices`. It includes
-known device metadata and device-specific layout paths. It includes a video path
-only when the service has a validated explicit video endpoint or a successful
-local startup video probe for that device. Access codes are never included in
-this response.
+known device metadata and device-specific layout and thumbnail paths. It
+includes a video path only when the service has a validated explicit video
+endpoint or a successful local startup video probe for that device. Access codes
+are never included in this response.
+
+Fetch the active print thumbnail with `/api/thumbnail?device=<DEVICE_ID>`.
+Without `device`, the first printer from the configured device list is used.
+Cloud devices resolve the current task through Bambu Cloud and cache the
+downloaded thumbnail. Local devices download the active `.3mf` from the printer
+over LAN FTPS and cache the embedded thumbnail.
 
 Useful commands:
 

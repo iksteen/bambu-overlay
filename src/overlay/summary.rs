@@ -194,6 +194,7 @@ impl<'a> DeviceFields<'a> {
         let progress = self.progress();
         let prediction = self.prediction();
         let start_time = self.start_time();
+        let filename = self.print_string(|print| print.filename.as_ref());
         let has_print_status_task = self.has_print_status_task(
             &task_name,
             &task_id,
@@ -201,6 +202,14 @@ impl<'a> DeviceFields<'a> {
             &start_time,
             prediction,
             progress,
+        );
+        let thumbnail = thumbnail_path(
+            device_id.as_deref(),
+            has_print_status_task,
+            task_id.as_deref(),
+            filename.as_deref(),
+            task_name.as_deref(),
+            start_time.as_deref(),
         );
 
         DeviceSummary {
@@ -213,12 +222,12 @@ impl<'a> DeviceFields<'a> {
             online: self.device.online.unwrap_or(true),
             task_name: task_name.clone(),
             title: task_name,
-            filename: self.print_string(|print| print.filename.as_ref()),
+            filename: filename.clone(),
             task_status,
             start_time,
             prediction,
             progress,
-            thumbnail: None,
+            thumbnail,
             weight: self.print_string(|print| print.weight.as_ref()),
             layer_current: self.print_i64(|print| print.layer_current),
             layer_total: self.print_i64(|print| print.layer_total),
@@ -255,6 +264,57 @@ fn summarize_device(
     let report = device.id.as_ref().and_then(|id| reports.get(id));
     let fields = DeviceFields::new(device, report);
     fields.summary()
+}
+
+fn thumbnail_path(
+    device_id: Option<&str>,
+    has_print_status_task: bool,
+    task_id: Option<&str>,
+    filename: Option<&str>,
+    task_name: Option<&str>,
+    start_time: Option<&str>,
+) -> Option<String> {
+    if !has_print_status_task {
+        return None;
+    }
+    let device_id = device_id?;
+    let mut path = format!("/api/thumbnail?device={}", encode_query_value(device_id));
+    if let Some(task) = task_id
+        .or(filename)
+        .or(task_name)
+        .or(start_time)
+        .map(str::trim)
+        .filter(|task| !task.is_empty())
+    {
+        path.push_str("&task=");
+        path.push_str(&encode_query_value(task));
+    }
+    Some(path)
+}
+
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(hex(byte >> 4));
+                encoded.push(hex(byte & 0x0f));
+            }
+        }
+    }
+    encoded
+}
+
+fn hex(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'A' + nibble - 10) as char,
+        _ => unreachable!("nibble must be four bits"),
+    }
 }
 
 pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {
@@ -525,7 +585,10 @@ mod tests {
         assert_eq!(device.total_print_time.as_deref(), Some("1h"));
         assert_eq!(device.weight, None);
         assert_eq!(device.plate, None);
-        assert_eq!(device.thumbnail, None);
+        assert_eq!(
+            device.thumbnail.as_deref(),
+            Some("/api/thumbnail?device=printer-a&task=Calibration%20cube")
+        );
         assert_eq!(device.ams_spools.len(), 1);
         assert_eq!(device.ams_spools[0].material, "PLA");
         assert_eq!(device.ams_spools[0].color, "#FF0000");
