@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::{Context, Result};
 use tracing::{error, warn};
 
@@ -16,23 +14,10 @@ pub struct CloudSession {
 }
 
 pub(crate) struct CloudMqttStartup {
-    pub(crate) host: String,
-    pub(crate) port: u16,
+    pub(crate) endpoint: MqttEndpoint,
     pub(crate) user_id: String,
     pub(crate) access_token: String,
     pub(crate) device_ids: Vec<String>,
-}
-
-pub(crate) async fn cloud_devices(
-    cloud: Option<&CloudSession>,
-    configs: &[String],
-    enumerate_catalog: bool,
-) -> Result<Vec<CloudDevice>> {
-    if enumerate_catalog {
-        bound_cloud_devices(cloud).await
-    } else {
-        Ok(explicit_cloud_devices(configs))
-    }
 }
 
 pub(crate) async fn bound_cloud_devices(cloud: Option<&CloudSession>) -> Result<Vec<CloudDevice>> {
@@ -44,7 +29,7 @@ pub(crate) async fn bound_cloud_devices(cloud: Option<&CloudSession>) -> Result<
     Ok(bound.devices)
 }
 
-fn explicit_cloud_devices(configs: &[String]) -> Vec<CloudDevice> {
+pub(crate) fn explicit_cloud_devices(configs: &[String]) -> Vec<CloudDevice> {
     configs
         .iter()
         .map(|device_id| explicit_cloud_device(device_id))
@@ -73,24 +58,11 @@ pub(crate) async fn cloud_mqtt_startup(
     })?;
     let user_id = cloud_mqtt_user_id(cloud).await?;
     Ok(Some(CloudMqttStartup {
-        host: endpoint.host.clone(),
-        port: endpoint.port,
+        endpoint: endpoint.clone(),
         user_id,
         access_token: cloud.access_token.clone(),
         device_ids: device_ids.to_vec(),
     }))
-}
-
-pub(crate) fn cloud_mqtt_device_ids(
-    catalog_devices: &[CloudDevice],
-    local_ids: &HashSet<String>,
-) -> Vec<String> {
-    catalog_devices
-        .iter()
-        .filter_map(|device| device.id.as_deref())
-        .filter(|device_id| !local_ids.contains(*device_id))
-        .map(str::to_owned)
-        .collect()
 }
 
 pub(crate) fn start_cloud_mqtt(runtime: MqttRuntime, startup: Option<CloudMqttStartup>) {
@@ -101,8 +73,8 @@ pub(crate) fn start_cloud_mqtt(runtime: MqttRuntime, startup: Option<CloudMqttSt
     let mqtt_status = runtime.clone();
     let supervisor = tokio::spawn(supervise_cloud(
         runtime,
-        startup.host,
-        startup.port,
+        startup.endpoint.host,
+        startup.endpoint.port,
         startup.user_id,
         startup.access_token,
         startup.device_ids,
@@ -138,7 +110,7 @@ async fn cloud_mqtt_user_id(cloud: &CloudSession) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bound_cloud_devices, cloud_devices, cloud_mqtt_startup};
+    use super::{bound_cloud_devices, cloud_mqtt_startup, explicit_cloud_devices};
     use crate::local::MqttEndpoint;
 
     fn mqtt_endpoint(value: &str) -> MqttEndpoint {
@@ -170,20 +142,18 @@ mod tests {
         assert!(error.to_string().contains("Bambu Cloud token"));
     }
 
-    #[tokio::test]
-    async fn explicit_cloud_devices_do_not_require_cloud_session_for_catalog() {
-        let devices = cloud_devices(None, &["printer-a".to_owned()], false)
-            .await
-            .unwrap();
+    #[test]
+    fn explicit_cloud_devices_do_not_require_cloud_session_for_catalog() {
+        let devices = explicit_cloud_devices(&["printer-a".to_owned()]);
 
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id.as_deref(), Some("printer-a"));
         assert_eq!(devices[0].access_code, None);
     }
 
-    #[tokio::test]
-    async fn cloud_devices_without_session_returns_empty_catalog() {
-        let devices = cloud_devices(None, &[], false).await.unwrap();
+    #[test]
+    fn explicit_cloud_devices_returns_empty_catalog_for_empty_config() {
+        let devices = explicit_cloud_devices(&[]);
 
         assert!(devices.is_empty());
     }

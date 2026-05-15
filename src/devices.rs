@@ -6,15 +6,12 @@ use tracing::{debug, info};
 
 use crate::{
     bambu::{CloudDevice, PrinterStatus},
-    cloud::{
-        bound_cloud_devices, cloud_devices as resolve_cloud_devices, cloud_mqtt_device_ids,
-        CloudSession,
-    },
+    cloud::{bound_cloud_devices, explicit_cloud_devices, CloudSession},
     local::{infer_local_device_id, Endpoint, LocalDevice, LocalEndpointArg},
     video::{infer_video_device_id, probe_video_endpoint, VideoEndpoint, DEFAULT_VIDEO_PORT},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DeviceSource {
     Cloud,
@@ -85,16 +82,19 @@ pub(crate) async fn resolve_devices(
     ensure_unique_local_device_ids(&local_args)?;
     let enumerate_cloud_catalog =
         should_enumerate_cloud_catalog(cloud.is_some(), cloud_configs, &local_args);
-    let cloud_devices =
-        resolve_cloud_devices(cloud, cloud_configs, enumerate_cloud_catalog).await?;
+    let cloud_devices = if enumerate_cloud_catalog {
+        bound_cloud_devices(cloud).await?
+    } else {
+        explicit_cloud_devices(cloud_configs)
+    };
     let mut bind_metadata = enumerate_cloud_catalog.then(|| cloud_devices.clone());
     let local =
         resolve_local_access(local_args, &explicit_video, cloud, &mut bind_metadata).await?;
 
     let local_ids = local_device_ids(&local);
-    let cloud_mqtt_ids = cloud_mqtt_device_ids(&cloud_devices, &local_ids);
     let mut catalog = catalog_devices(cloud_devices, &local, &local_ids);
     resolve_catalog_video_access(&mut catalog, &explicit_video, cloud, &mut bind_metadata).await?;
+    let cloud_mqtt_ids = cloud_mqtt_device_ids(&catalog);
     if catalog.is_empty() {
         anyhow::bail!(
             "no devices configured; run `bambu-overlay login`, set --cloud-device, or set --local-device"
@@ -229,9 +229,7 @@ async fn resolve_local_device_access(
     }
     if !has_access_code(endpoint.access_code.as_deref()) {
         if let Some(metadata) = bind_device(cloud, bind_metadata, &device_id).await? {
-            if !has_access_code(endpoint.access_code.as_deref()) {
-                endpoint.access_code = metadata.access_code;
-            }
+            endpoint.access_code = metadata.access_code;
             if !has_text(endpoint.name.as_deref()) {
                 endpoint.name = metadata.name;
             }
@@ -294,15 +292,11 @@ async fn resolve_known_device_access(
     if !device.has_access_code() {
         if let Some(device_id) = device.id.as_deref() {
             if let Some(metadata) = bind_device(cloud, bind_metadata, device_id).await? {
-                if !device.has_access_code() {
-                    device.access_code = metadata.access_code;
-                }
+                device.access_code = metadata.access_code;
                 if !has_text(device.name.as_deref()) {
                     device.name = metadata.name;
                 }
-                if device.online.is_none() {
-                    device.online = metadata.online;
-                }
+                device.online = device.online.or(metadata.online);
             }
         }
     }
@@ -404,6 +398,14 @@ fn catalog_devices(
 fn catalog_device_ids(devices: &[KnownDevice]) -> HashSet<String> {
     devices
         .iter()
+        .filter_map(|device| device.id.clone())
+        .collect()
+}
+
+fn cloud_mqtt_device_ids(devices: &[KnownDevice]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| device.source == DeviceSource::Cloud)
         .filter_map(|device| device.id.clone())
         .collect()
 }

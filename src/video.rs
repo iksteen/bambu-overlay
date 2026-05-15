@@ -53,6 +53,14 @@ impl VideoEndpoint {
         self.endpoint.to_string()
     }
 
+    fn host(&self) -> &str {
+        self.endpoint.host.as_str()
+    }
+
+    fn port(&self) -> u16 {
+        self.endpoint.port
+    }
+
     pub(crate) fn access_code(&self) -> Option<&str> {
         self.access_code.as_deref()
     }
@@ -234,13 +242,7 @@ pub async fn probe_video_endpoint(device_id: &str, endpoint: &VideoEndpoint) -> 
     let device_id = device_id.trim();
     ensure!(!device_id.is_empty(), "device ID is empty");
     let address = endpoint.address();
-    let tcp = tokio::time::timeout(
-        VIDEO_PROBE_TIMEOUT,
-        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
-    )
-    .await
-    .with_context(|| format!("timed out probing video server at {address}"))?
-    .with_context(|| format!("failed to connect to video server at {address}"))?;
+    let tcp = connect_video_tcp(endpoint, VIDEO_PROBE_TIMEOUT, "probing video server").await?;
 
     let tls = device_tls::tokio_connector()?;
     let socket = tokio::time::timeout(VIDEO_PROBE_TIMEOUT, tls.connect(device_id, tcp))
@@ -259,22 +261,13 @@ pub async fn probe_video_endpoint(device_id: &str, endpoint: &VideoEndpoint) -> 
 
 pub async fn infer_video_device_id(endpoint: &VideoEndpoint) -> Result<String> {
     let address = endpoint.address();
-    let tcp = tokio::time::timeout(
-        VIDEO_PROBE_TIMEOUT,
-        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
-    )
-    .await
-    .with_context(|| format!("timed out probing video server at {address}"))?
-    .with_context(|| format!("failed to connect to video server at {address}"))?;
+    let tcp = connect_video_tcp(endpoint, VIDEO_PROBE_TIMEOUT, "probing video server").await?;
 
     let tls = device_tls::tokio_connector()?;
-    let socket = tokio::time::timeout(
-        VIDEO_PROBE_TIMEOUT,
-        tls.connect(endpoint.endpoint.host.as_str(), tcp),
-    )
-    .await
-    .with_context(|| format!("timed out probing video TLS at {address}"))?
-    .with_context(|| format!("failed TLS handshake while probing video server at {address}"))?;
+    let socket = tokio::time::timeout(VIDEO_PROBE_TIMEOUT, tls.connect(endpoint.host(), tcp))
+        .await
+        .with_context(|| format!("timed out probing video TLS at {address}"))?
+        .with_context(|| format!("failed TLS handshake while probing video server at {address}"))?;
 
     device_tls::peer_device_id(&socket)
         .context("video server certificate did not include a usable common name")
@@ -354,14 +347,7 @@ async fn stream_endpoint_once(
     endpoint: &VideoEndpoint,
 ) -> Result<()> {
     let address = endpoint.address();
-
-    let tcp = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        TcpStream::connect((endpoint.endpoint.host.as_str(), endpoint.endpoint.port)),
-    )
-    .await
-    .with_context(|| format!("timed out connecting to video server at {address}"))?
-    .with_context(|| format!("failed to connect to video server at {address}"))?;
+    let tcp = connect_video_tcp(endpoint, CONNECT_TIMEOUT, "connecting to video server").await?;
 
     let mut socket = inner
         .tls
@@ -417,6 +403,21 @@ async fn stream_endpoint_once(
     }
 
     Ok(())
+}
+
+async fn connect_video_tcp(
+    endpoint: &VideoEndpoint,
+    timeout: Duration,
+    action: &str,
+) -> Result<TcpStream> {
+    let address = endpoint.address();
+    tokio::time::timeout(
+        timeout,
+        TcpStream::connect((endpoint.host(), endpoint.port())),
+    )
+    .await
+    .with_context(|| format!("timed out {action} at {address}"))?
+    .with_context(|| format!("failed to connect to video server at {address}"))
 }
 
 async fn sleep_or_no_clients(stream: &VideoStream, delay: Duration) {

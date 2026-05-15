@@ -187,20 +187,18 @@ impl KnownDevices {
         device: &KnownDevice,
         runtime_video_ids: &HashSet<String>,
     ) -> KnownDevicePayload {
-        let id = device.id.clone();
-        let source = device.source.clone();
+        let id = device.id.as_deref();
         let has_access_code = device.has_access_code();
         let has_video = id
-            .as_deref()
             .is_some_and(|id| self.probed_video_ids.contains(id) || runtime_video_ids.contains(id));
         let has_video = has_access_code && has_video;
 
         KnownDevicePayload {
-            id: id.clone(),
+            id: device.id.clone(),
             name: device.name.clone(),
             online: device.online,
-            source,
-            paths: device_paths(id.as_deref(), has_video),
+            source: device.source,
+            paths: device_paths(id, has_video),
         }
     }
 }
