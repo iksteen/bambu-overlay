@@ -215,11 +215,16 @@ body {
   padding: 0 4px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 5px;
-  background: var(--bg-strong);
-  color: var(--text);
+  background: var(--spool-tag-bg, var(--bg-strong));
+  color: var(--spool-tag-fg, var(--text));
   font-size: 10px;
   font-weight: 900;
   line-height: 1;
+}
+
+.spool.is-active {
+  --spool-tag-bg: var(--text);
+  --spool-tag-fg: var(--bg-strong);
 }
 
 .spool-material {

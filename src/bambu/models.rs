@@ -157,6 +157,8 @@ impl PrinterStatus {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct AmsState {
+    #[serde(default, rename = "tray_now", deserialize_with = "de::optional_i64")]
+    pub tray_now: Option<i64>,
     #[serde(default)]
     pub ams: Vec<AmsUnit>,
 }
@@ -328,8 +330,15 @@ fn merge_option<T>(target: &mut Option<T>, patch: Option<T>) {
 }
 
 fn merge_ams(target: &mut Option<AmsState>, patch: Option<AmsState>) {
-    if patch.as_ref().is_some_and(AmsState::has_spool_data) || target.is_none() {
-        merge_option(target, patch);
+    let Some(patch) = patch else {
+        return;
+    };
+    if target.is_none() || patch.has_spool_data() {
+        *target = Some(patch);
+    } else if let Some(tray_now) = patch.tray_now {
+        if let Some(target) = target {
+            target.tray_now = Some(tray_now);
+        }
     }
 }
 
@@ -428,7 +437,7 @@ mod tests {
         .unwrap();
         let patch: PrinterStatus = serde_json::from_value(json!({
             "mc_percent": 20,
-            "ams": {"ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
+            "ams": {"tray_now": "0", "ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
             "vt_tray": {"id": 255, "tray_color": "00000000"}
         }))
         .unwrap();
@@ -436,6 +445,7 @@ mod tests {
         status.merge(patch);
 
         assert_eq!(status.progress, Some(20.0));
+        assert_eq!(status.ams.as_ref().unwrap().tray_now, Some(0));
         let tray = &status.ams.as_ref().unwrap().ams[0].tray[0];
         assert_eq!(tray.material.as_deref(), Some("PLA"));
         assert_eq!(tray.color.as_deref(), Some("ff0000ff"));

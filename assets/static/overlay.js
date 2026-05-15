@@ -95,6 +95,7 @@
   function spoolElement(spool) {
     const el = document.createElement("div");
     el.className = "spool";
+    el.classList.toggle("is-active", spool.active === true);
 
     const roll = document.createElement("div");
     roll.className = "spool-roll";

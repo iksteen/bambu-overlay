@@ -83,6 +83,7 @@ struct Spool {
     label: String,
     material: String,
     color: String,
+    active: bool,
 }
 
 struct DeviceFields<'a> {
@@ -136,6 +137,18 @@ impl<'a> DeviceFields<'a> {
         self.report
             .and_then(print_mode)
             .or_else(|| print_mode(self.catalog_status()))
+    }
+
+    fn active_tray(&self) -> Option<i64> {
+        self.report
+            .and_then(|print| print.ams.as_ref())
+            .and_then(|ams| ams.tray_now)
+            .or_else(|| {
+                self.catalog_status()
+                    .ams
+                    .as_ref()
+                    .and_then(|ams| ams.tray_now)
+            })
     }
 
     fn task_id(&self) -> Option<String> {
@@ -195,6 +208,7 @@ impl<'a> DeviceFields<'a> {
         let prediction = self.prediction();
         let start_time = self.start_time();
         let filename = self.print_string(|print| print.filename.as_ref());
+        let active_tray = self.active_tray();
         let has_print_status_task = self.has_print_status_task(
             &task_name,
             &task_id,
@@ -238,8 +252,8 @@ impl<'a> DeviceFields<'a> {
             bed_temperature: self.print_f64(|print| print.bed_temperature),
             fan_speed: self.print_f64(|print| print.fan_speed),
             print_mode: self.display_mode(),
-            ams_spools: ams_spools(self.ams()),
-            external_spool: external_spool(self.external_tray()),
+            ams_spools: ams_spools(self.ams(), active_tray),
+            external_spool: external_spool(self.external_tray(), active_tray),
             is_printing: has_print_status_task,
             task_source: TaskSource::PrinterStatus,
             plate_index: None,
@@ -353,18 +367,21 @@ pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {
     }
 }
 
-fn ams_spools(ams: Option<&AmsState>) -> Vec<Spool> {
+fn ams_spools(ams: Option<&AmsState>, active_tray: Option<i64>) -> Vec<Spool> {
     let Some(ams) = ams else {
         return Vec::new();
     };
     let mut spools = Vec::new();
     for (ams_index, ams_unit) in ams.ams.iter().enumerate() {
         for (tray_index, tray) in ams_unit.tray.iter().enumerate() {
-            let mut label = ((tray.id.unwrap_or(tray_index as i64)) + 1).to_string();
+            let ams_id = ams_unit.id.unwrap_or(ams_index as i64);
+            let tray_id = tray.id.unwrap_or(tray_index as i64);
+            let mut label = (tray_id + 1).to_string();
             if ams.ams.len() > 1 {
-                label = format!("{}-{label}", ams_unit.id.unwrap_or(ams_index as i64) + 1);
+                label = format!("{}-{label}", ams_id + 1);
             }
-            if let Some(spool) = spool_summary(tray, label) {
+            let active = active_tray.is_some_and(|active| active == ams_id * 4 + tray_id);
+            if let Some(spool) = spool_summary(tray, label, active) {
                 spools.push(spool);
             }
         }
@@ -372,11 +389,15 @@ fn ams_spools(ams: Option<&AmsState>) -> Vec<Spool> {
     spools
 }
 
-fn external_spool(tray: Option<&Tray>) -> Option<Spool> {
-    tray.and_then(|tray| spool_summary(tray, "ext".to_owned()))
+fn external_spool(tray: Option<&Tray>, active_tray: Option<i64>) -> Option<Spool> {
+    tray.and_then(|tray| {
+        let active =
+            active_tray.is_some_and(|active| tray.id.is_some_and(|tray_id| active == tray_id));
+        spool_summary(tray, "ext".to_owned(), active)
+    })
 }
 
-fn spool_summary(tray: &Tray, label: String) -> Option<Spool> {
+fn spool_summary(tray: &Tray, label: String, active: bool) -> Option<Spool> {
     let material = tray
         .material
         .clone()
@@ -391,6 +412,7 @@ fn spool_summary(tray: &Tray, label: String) -> Option<Spool> {
         label,
         material: material.unwrap_or_else(|| "Filament".to_owned()),
         color: color.unwrap_or_else(|| "#9CA3AF".to_owned()),
+        active,
     })
 }
 
@@ -517,7 +539,7 @@ mod tests {
                             ]
                         },
                         "vt_tray": {
-                            "id": 255,
+                            "id": 777,
                             "tray_type": "PETG",
                             "tray_color": "336699ff"
                         }
@@ -527,8 +549,8 @@ mod tests {
             "printer-a".to_owned(),
             decode(json!({
                 "mc_percent": 42,
-                "ams": {"ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
-                "vt_tray": {"id": 255, "tray_color": "00000000"}
+                "ams": {"tray_now": "777", "ams": [{"id": 0, "tray": [{"id": 0, "tray_color": "00000000"}]}]},
+                "vt_tray": {"id": 777, "tray_color": "00000000"}
             })),
         )]);
 
@@ -539,8 +561,10 @@ mod tests {
         assert_eq!(device.ams_spools.len(), 1);
         assert_eq!(device.ams_spools[0].material, "PLA");
         assert_eq!(device.ams_spools[0].color, "#FF0000");
+        assert!(!device.ams_spools[0].active);
         assert_eq!(device.external_spool.as_ref().unwrap().material, "PETG");
         assert_eq!(device.external_spool.as_ref().unwrap().color, "#336699");
+        assert!(device.external_spool.as_ref().unwrap().active);
     }
 
     #[test]
@@ -559,6 +583,7 @@ mod tests {
                         "nozzle_temper": 220,
                         "bed_temper": 60,
                         "ams": {
+                            "tray_now": "0",
                             "ams": [
                                 {
                                     "id": 0,
@@ -592,6 +617,7 @@ mod tests {
         assert_eq!(device.ams_spools.len(), 1);
         assert_eq!(device.ams_spools[0].material, "PLA");
         assert_eq!(device.ams_spools[0].color, "#FF0000");
+        assert!(device.ams_spools[0].active);
     }
 
     #[test]
