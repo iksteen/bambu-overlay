@@ -25,21 +25,14 @@ pub struct CurrentPrintResponse {
 pub struct CloudDevice {
     #[serde(default, rename = "dev_id", deserialize_with = "de::optional_string")]
     pub id: Option<String>,
-    #[serde(default, rename = "dev_name", deserialize_with = "de::optional_string")]
+    #[serde(
+        default,
+        rename = "dev_name",
+        alias = "name",
+        deserialize_with = "de::optional_string"
+    )]
     pub name: Option<String>,
-    #[serde(
-        default,
-        rename = "dev_model_name",
-        deserialize_with = "de::optional_string"
-    )]
-    pub model_name: Option<String>,
-    #[serde(
-        default,
-        rename = "dev_product_name",
-        deserialize_with = "de::optional_string"
-    )]
-    pub product_name: Option<String>,
-    #[serde(default, rename = "dev_online")]
+    #[serde(default, rename = "dev_online", alias = "online")]
     pub online: Option<bool>,
     #[serde(
         default,
@@ -257,12 +250,6 @@ pub struct Task {
         deserialize_with = "de::optional_string"
     )]
     pub device_name: Option<String>,
-    #[serde(
-        default,
-        rename = "deviceModel",
-        deserialize_with = "de::optional_string"
-    )]
-    pub device_model: Option<String>,
     #[serde(default, deserialize_with = "de::optional_string")]
     pub id: Option<String>,
     #[serde(default, deserialize_with = "de::optional_string")]

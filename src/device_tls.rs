@@ -1,7 +1,7 @@
 //! TLS policy shared by Bambu device-local services.
 //!
-//! Video uses this today. A future local MQTT transport should use the same
-//! connector and device-ID check rather than duplicating certificate handling.
+//! Video uses the BBL CA plus an explicit device-ID check. Local MQTT reuses
+//! the same native TLS connector through rumqttc.
 
 use anyhow::{Context, Result};
 use native_tls::{Certificate, TlsConnector as NativeTlsConnector};

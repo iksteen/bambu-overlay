@@ -60,6 +60,15 @@ impl BambuClient {
         .await
     }
 
+    pub async fn bound_devices(&self, access_token: &str) -> Result<CurrentPrintResponse> {
+        self.request_json(
+            Method::GET,
+            "/v1/iot-service/api/user/bind",
+            Some(access_token),
+        )
+        .await
+    }
+
     pub async fn tasks(
         &self,
         access_token: &str,

@@ -1,10 +1,16 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::bambu::LoginResponse;
+
+static DEFAULT_TOKEN_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +97,14 @@ pub fn token_path(token_file: Option<PathBuf>) -> PathBuf {
     if let Some(token_file) = token_file {
         return token_file;
     }
+    default_token_path().to_path_buf()
+}
+
+pub fn default_token_path() -> &'static Path {
+    DEFAULT_TOKEN_PATH.get_or_init(resolve_default_token_path)
+}
+
+fn resolve_default_token_path() -> PathBuf {
     if let Ok(xdg_state_home) = env::var("XDG_STATE_HOME") {
         return PathBuf::from(xdg_state_home)
             .join("bambu-overlay")

@@ -1,20 +1,18 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
-    auth::{load_token, save_token},
-    bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST, MQTT_PORT},
+    auth::{default_token_path, load_token, save_token},
+    bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST},
+    local::{CloudDeviceConfig, Endpoint, LocalDeviceConfig, MqttEndpoint},
     video::VideoEndpoint,
-    web::{
-        serve, ServerConfig, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_REFRESH_SECONDS,
-        DEFAULT_TASK_LIMIT,
-    },
+    web::{serve, CloudSession, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
 };
 
 #[derive(Parser)]
-#[command(name = "bambu-overlay", version, about = "Bambu Cloud overlay")]
+#[command(name = "bambu-overlay", version, about = "Bambu printer OBS overlay")]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -40,8 +38,25 @@ struct HttpArgs {
 
 #[derive(Args, Clone)]
 struct TokenFileArgs {
-    #[arg(long)]
-    token_file: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value_os_t = default_token_path().to_path_buf(),
+        help = "Bambu Cloud token JSON path"
+    )]
+    token_file: PathBuf,
+}
+
+#[derive(Args, Clone)]
+struct ServeTokenFileArgs {
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value_os_t = default_token_path().to_path_buf(),
+        help = "Bambu Cloud token JSON path",
+        help_heading = "Cloud"
+    )]
+    token_file: PathBuf,
 }
 
 #[derive(Args)]
@@ -68,30 +83,60 @@ struct DevicesArgs {
 
 #[derive(Args)]
 struct ServeArgs {
-    #[command(flatten)]
-    token: TokenFileArgs,
-    #[arg(long, default_value_t = 30.0, value_parser = positive_f64)]
-    timeout: f64,
-    #[arg(long, default_value = DEFAULT_HOST)]
-    host: String,
-    #[arg(long, default_value_t = DEFAULT_PORT)]
-    port: u16,
-    #[arg(long, default_value_t = DEFAULT_REFRESH_SECONDS, value_parser = positive_f64)]
-    refresh_seconds: f64,
-    #[arg(long, default_value_t = DEFAULT_TASK_LIMIT, value_parser = positive_usize)]
-    task_limit: usize,
-    #[arg(long, default_value = MQTT_HOST)]
-    mqtt_host: String,
-    #[arg(long, default_value_t = MQTT_PORT)]
-    mqtt_port: u16,
-    #[arg(long)]
-    no_mqtt: bool,
     #[arg(
-        long = "video",
+        long = "bind",
         value_name = "HOST[:PORT]",
-        help = "Printer LAN video endpoint; repeat for multiple printers. Port defaults to 6000"
+        default_value = DEFAULT_HOST,
+        value_parser = parse_bind_endpoint,
+        help = "HTTP bind address. Port defaults to 8765",
+        help_heading = "Server"
     )]
-    video: Vec<VideoEndpoint>,
+    bind: Endpoint,
+    #[command(flatten)]
+    token: ServeTokenFileArgs,
+    #[arg(
+        long,
+        default_value_t = 30.0,
+        value_parser = positive_f64,
+        help = "Bambu Cloud API timeout in seconds",
+        help_heading = "Cloud"
+    )]
+    timeout: f64,
+    #[arg(
+        long = "no-cloud-enum",
+        help = "Do not enumerate Bambu Cloud /bind devices while serving",
+        help_heading = "Cloud"
+    )]
+    no_cloud_enum: bool,
+    #[arg(
+        long = "cloud-mqtt",
+        value_name = "HOST[:PORT]",
+        default_value = MQTT_HOST,
+        help = "Bambu Cloud MQTT endpoint. Port defaults to 8883",
+        help_heading = "Cloud"
+    )]
+    cloud_mqtt: MqttEndpoint,
+    #[arg(
+        long = "cloud-device",
+        value_name = "DEVICE_ID[,ACCESS_CODE[,NAME]]",
+        help = "Explicit Bambu Cloud MQTT device; repeat to add or override devices. Does not disable /bind enumeration; use --no-cloud-enum for that",
+        help_heading = "Cloud"
+    )]
+    cloud_devices: Vec<CloudDeviceConfig>,
+    #[arg(
+        long = "local-device",
+        value_name = "HOST[:PORT][,ACCESS_CODE[,NAME]]",
+        help = "Printer LAN MQTT device; repeat for multiple printers. Port defaults to 8883. The device ID is inferred from the MQTT certificate. ACCESS_CODE can be provided here, by matching /bind metadata, or by a matching --cloud-device",
+        help_heading = "Local LAN"
+    )]
+    local_devices: Vec<LocalDeviceConfig>,
+    #[arg(
+        long = "video-device",
+        value_name = "HOST[:PORT]",
+        help = "Printer LAN video endpoint; repeat for multiple printers. Port defaults to 6000. The device ID is inferred from the video certificate and must match a configured cloud or local device",
+        help_heading = "Local LAN"
+    )]
+    video_devices: Vec<VideoEndpoint>,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -129,40 +174,69 @@ async fn login(args: LoginArgs) -> Result<()> {
         login_response = client.login(&account, None, Some(&code)).await?;
     }
 
-    let token_path = save_token(&login_response, args.token.token_file, &args.http.api_base)?;
+    let token_path = save_token(
+        &login_response,
+        Some(args.token.token_file),
+        &args.http.api_base,
+    )?;
     println!("Saved Bambu access token to {}", token_path.display());
     println!("Run `bambu-overlay serve` to start the overlay.");
     Ok(())
 }
 
 async fn devices_cmd(args: DevicesArgs) -> Result<()> {
-    let (client, access_token) = token_client(args.token.token_file, args.timeout)?;
-    let current_print = client.current_print(&access_token).await?;
+    let (client, access_token) = token_client(Some(args.token.token_file), args.timeout)?;
+    let bound_devices = client.bound_devices(&access_token).await?;
 
     println!(
-        "{:<24}  {:<32}  {:<8}  {:<1}",
-        "ID", "NAME", "ONLINE", "MODEL"
+        "{:<24}  {:<32}  {:<8}  {:<12}",
+        "ID", "NAME", "ONLINE", "ACCESS CODE"
     );
-    for device in current_print.devices {
+    for device in bound_devices.devices {
         let id = device.id.unwrap_or_else(|| "--".to_owned());
         let name = device.name.unwrap_or_else(|| "--".to_owned());
+        let access_code = device.access_code.unwrap_or_else(|| "--".to_owned());
         let online = match device.online {
             Some(true) => "yes",
             Some(false) => "no",
             None => "--",
         };
-        let model = device
-            .product_name
-            .or(device.model_name)
-            .unwrap_or_else(|| "--".to_owned());
-        println!("{id:<24}  {name:<32}  {online:<8}  {model}");
+        println!("{id:<24}  {name:<32}  {online:<8}  {access_code:<12}");
     }
     Ok(())
 }
 
 async fn serve_cmd(args: ServeArgs) -> Result<()> {
-    let (client, access_token) = token_client(args.token.token_file.clone(), args.timeout)?;
-    serve(client, access_token, ServerConfig::from(&args)).await
+    validate_devices(&args.cloud_devices)?;
+    let config = ServerConfig::from(&args);
+    let cloud = optional_token_client(args.token.token_file.clone(), args.timeout)?;
+    serve(cloud, config).await
+}
+
+fn validate_devices(cloud_devices: &[CloudDeviceConfig]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for device in cloud_devices {
+        if !seen.insert(device.id.as_str()) {
+            bail!(
+                "--cloud-device includes duplicate device id `{}`",
+                device.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn optional_token_client(token_file: PathBuf, timeout: f64) -> Result<Option<CloudSession>> {
+    if !token_file.exists() {
+        return Ok(None);
+    }
+
+    token_client(Some(token_file), timeout).map(|(client, access_token)| {
+        Some(CloudSession {
+            client,
+            access_token,
+        })
+    })
 }
 
 fn token_client(token_file: Option<PathBuf>, timeout: f64) -> Result<(BambuClient, String)> {
@@ -197,14 +271,12 @@ fn requires_verification_code(login_response: &LoginResponse) -> bool {
 impl From<&ServeArgs> for ServerConfig {
     fn from(args: &ServeArgs) -> Self {
         Self {
-            host: args.host.clone(),
-            port: args.port,
-            task_limit: args.task_limit,
-            refresh_seconds: args.refresh_seconds,
-            mqtt_host: args.mqtt_host.clone(),
-            mqtt_port: args.mqtt_port,
-            no_mqtt: args.no_mqtt,
-            video_endpoints: args.video.clone(),
+            bind: args.bind.clone(),
+            cloud_mqtt: args.cloud_mqtt.clone(),
+            no_cloud_enum: args.no_cloud_enum,
+            local_devices: args.local_devices.clone(),
+            cloud_devices: args.cloud_devices.clone(),
+            video_endpoints: args.video_devices.clone(),
         }
     }
 }
@@ -232,13 +304,6 @@ fn positive_f64(value: &str) -> std::result::Result<f64, String> {
     }
 }
 
-fn positive_usize(value: &str) -> std::result::Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("expected a positive integer, got `{value}`"))?;
-    if parsed > 0 {
-        Ok(parsed)
-    } else {
-        Err(format!("expected a positive integer, got `{value}`"))
-    }
+fn parse_bind_endpoint(value: &str) -> std::result::Result<Endpoint, String> {
+    Endpoint::parse_with_default(value, "bind address", DEFAULT_PORT)
 }

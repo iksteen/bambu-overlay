@@ -6,8 +6,8 @@
     {
       "dev_access_code": "redacted",
       "dev_id": "printer-a",
-      "dev_name": "Office X1",
-      "dev_online": true
+      "name": "Office X1",
+      "online": true
     }
   ]
 }

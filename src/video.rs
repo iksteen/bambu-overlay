@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt, str,
     str::FromStr,
     sync::{
@@ -20,14 +20,11 @@ use tokio::{
 use tokio_native_tls::TlsConnector;
 use tracing::{info, warn};
 
-use crate::{
-    bambu::{BambuClient, CloudDevice},
-    device_tls,
-    devices::DeviceRegistry,
-};
+use crate::{bambu::CloudDevice, device_tls, local::Endpoint};
 
 pub const DEFAULT_VIDEO_PORT: u16 = 6000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const VIDEO_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -41,6 +38,13 @@ pub struct VideoEndpoint {
 }
 
 impl VideoEndpoint {
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+        }
+    }
+
     fn address(&self) -> String {
         if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)
@@ -60,7 +64,8 @@ impl FromStr for VideoEndpoint {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        parse_video_endpoint(value)
+        let endpoint = Endpoint::parse_with_default(value, "video endpoint", DEFAULT_VIDEO_PORT)?;
+        Ok(Self::new(endpoint.host, endpoint.port))
     }
 }
 
@@ -70,11 +75,9 @@ pub struct VideoRuntime {
 }
 
 struct VideoRuntimeInner {
-    client: BambuClient,
-    access_token: String,
+    devices: Vec<CloudDevice>,
     endpoints: Vec<VideoEndpoint>,
     tls: TlsConnector,
-    devices: DeviceRegistry,
     streams: Mutex<HashMap<String, Arc<VideoStream>>>,
     endpoint_map: Mutex<HashMap<String, VideoEndpoint>>,
 }
@@ -120,28 +123,25 @@ pub fn mjpeg_part(frame: &[u8]) -> Bytes {
 
 impl VideoRuntime {
     pub fn new(
-        client: BambuClient,
-        access_token: String,
+        devices: Vec<CloudDevice>,
         endpoints: Vec<VideoEndpoint>,
-        devices: DeviceRegistry,
+        endpoint_map: HashMap<String, VideoEndpoint>,
     ) -> Result<Self> {
         let tls = device_tls::tokio_connector()?;
         Ok(Self {
             inner: Arc::new(VideoRuntimeInner {
-                client,
-                access_token,
+                devices,
                 endpoints,
                 tls,
-                devices,
                 streams: Mutex::new(HashMap::new()),
-                endpoint_map: Mutex::new(HashMap::new()),
+                endpoint_map: Mutex::new(endpoint_map),
             }),
         })
     }
 
     pub async fn subscribe(&self, device_id: Option<&str>) -> Result<VideoSubscription> {
         if self.inner.endpoints.is_empty() {
-            bail!("video stream is disabled; set at least one --video");
+            bail!("video stream is disabled; set at least one --video-device");
         }
 
         let session = resolve_session(&self.inner, device_id).await?;
@@ -157,6 +157,16 @@ impl VideoRuntime {
             receiver,
             _guard: guard,
         })
+    }
+
+    pub async fn known_device_ids(&self) -> HashSet<String> {
+        self.inner
+            .endpoint_map
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect()
     }
 
     async fn stream_for_device(&self, device_id: &str) -> Arc<VideoStream> {
@@ -190,6 +200,56 @@ impl VideoRuntime {
             )));
         }
     }
+}
+
+pub async fn probe_video_endpoint(device_id: &str, endpoint: &VideoEndpoint) -> Result<()> {
+    let device_id = device_id.trim();
+    ensure!(!device_id.is_empty(), "device ID is empty");
+    let address = endpoint.address();
+    let tcp = tokio::time::timeout(
+        VIDEO_PROBE_TIMEOUT,
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+    )
+    .await
+    .with_context(|| format!("timed out probing video server at {address}"))?
+    .with_context(|| format!("failed to connect to video server at {address}"))?;
+
+    let tls = device_tls::tokio_connector()?;
+    let socket = tokio::time::timeout(VIDEO_PROBE_TIMEOUT, tls.connect(device_id, tcp))
+        .await
+        .with_context(|| format!("timed out probing video TLS at {address}"))?
+        .with_context(|| format!("failed TLS handshake while probing video server at {address}"))?;
+    let certificate_device_id = device_tls::peer_device_id(&socket)
+        .context("video server certificate did not include a usable common name")?;
+    ensure!(
+        certificate_device_id == device_id,
+        "video endpoint certificate is for device `{certificate_device_id}`, not `{device_id}`"
+    );
+
+    Ok(())
+}
+
+pub async fn infer_video_device_id(endpoint: &VideoEndpoint) -> Result<String> {
+    let address = endpoint.address();
+    let tcp = tokio::time::timeout(
+        VIDEO_PROBE_TIMEOUT,
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+    )
+    .await
+    .with_context(|| format!("timed out probing video server at {address}"))?
+    .with_context(|| format!("failed to connect to video server at {address}"))?;
+
+    let tls = device_tls::tokio_connector()?;
+    let socket = tokio::time::timeout(
+        VIDEO_PROBE_TIMEOUT,
+        tls.connect(endpoint.host.as_str(), tcp),
+    )
+    .await
+    .with_context(|| format!("timed out probing video TLS at {address}"))?
+    .with_context(|| format!("failed TLS handshake while probing video server at {address}"))?;
+
+    device_tls::peer_device_id(&socket)
+        .context("video server certificate did not include a usable common name")
 }
 
 impl VideoSubscription {
@@ -373,16 +433,7 @@ async fn resolve_session(
     inner: &VideoRuntimeInner,
     requested_device_id: Option<&str>,
 ) -> Result<VideoSession> {
-    let mut current_print = inner
-        .client
-        .current_print(&inner.access_token)
-        .await
-        .context("failed to fetch video access code from Bambu Cloud")?;
-    current_print.devices = inner
-        .devices
-        .order_cloud_devices(current_print.devices)
-        .await;
-    select_session(current_print.devices, requested_device_id)
+    select_session(inner.devices.clone(), requested_device_id)
 }
 
 fn select_session(
@@ -450,72 +501,6 @@ fn write_auth_field(target: &mut [u8], value: &str, label: &str) -> Result<()> {
 
 fn is_jpeg(frame: &[u8]) -> bool {
     frame.starts_with(&[0xff, 0xd8]) && frame.ends_with(&[0xff, 0xd9])
-}
-
-fn parse_video_endpoint(value: &str) -> std::result::Result<VideoEndpoint, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("video endpoint must not be empty".to_owned());
-    }
-
-    let (host, port) = split_video_endpoint(value)?;
-    let port = port
-        .map(|port| parse_video_port(port, value))
-        .transpose()?
-        .unwrap_or(DEFAULT_VIDEO_PORT);
-    build_video_endpoint(host, port, value)
-}
-
-fn split_video_endpoint(value: &str) -> std::result::Result<(&str, Option<&str>), String> {
-    if let Some(rest) = value.strip_prefix('[') {
-        let Some((host, suffix)) = rest.split_once(']') else {
-            return Err(format!("invalid video endpoint `{value}`"));
-        };
-
-        let port = match suffix.strip_prefix(':') {
-            Some(port) => Some(port),
-            None if suffix.is_empty() => None,
-            _ => return Err(format!("invalid video endpoint `{value}`")),
-        };
-        return Ok((host, port));
-    }
-
-    if value.matches(':').count() == 1 {
-        let (host, port) = value
-            .split_once(':')
-            .expect("single colon should split endpoint");
-        return Ok((host, Some(port)));
-    }
-
-    Ok((value, None))
-}
-
-fn build_video_endpoint(
-    host: &str,
-    port: u16,
-    endpoint: &str,
-) -> std::result::Result<VideoEndpoint, String> {
-    let host = host.trim();
-    if host.is_empty() {
-        return Err(format!(
-            "invalid video endpoint `{endpoint}`: host is empty"
-        ));
-    }
-    Ok(VideoEndpoint {
-        host: host.to_owned(),
-        port,
-    })
-}
-
-fn parse_video_port(port: &str, endpoint: &str) -> std::result::Result<u16, String> {
-    let port = port.trim();
-    if port.is_empty() {
-        return Err(format!(
-            "invalid video endpoint `{endpoint}`: port is empty"
-        ));
-    }
-    port.parse::<u16>()
-        .map_err(|_| format!("invalid video endpoint `{endpoint}`: expected a valid TCP port"))
 }
 
 async fn candidate_endpoints(inner: &VideoRuntimeInner, device_id: &str) -> Vec<VideoEndpoint> {

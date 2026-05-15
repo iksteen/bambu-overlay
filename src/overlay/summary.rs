@@ -37,8 +37,6 @@ enum TaskSource {
 pub(super) struct DeviceSummary {
     id: Option<String>,
     name: String,
-    model_name: Option<String>,
-    product_name: Option<String>,
     online: bool,
     task_id: Option<String>,
     task_name: Option<String>,
@@ -69,7 +67,6 @@ pub(super) struct DeviceSummary {
 pub(super) struct OverlayDevice {
     id: Option<String>,
     name: String,
-    model: String,
     online: bool,
     is_printing: bool,
     title: Option<String>,
@@ -227,8 +224,6 @@ impl<'a> DeviceFields<'a> {
                 .name
                 .clone()
                 .unwrap_or_else(|| "Bambu printer".to_owned()),
-            model_name: self.device.model_name.clone(),
-            product_name: self.device.product_name.clone(),
             online: self.device.online.unwrap_or(true),
             task_id,
             task_name: task_name.clone(),
@@ -318,7 +313,6 @@ impl<'a> TaskRecord<'a> {
                 .device_name
                 .clone()
                 .unwrap_or_else(|| "Bambu printer".to_owned()),
-            model_name: self.task.device_model.clone(),
             online: true,
             task_id: self.task.id.clone(),
             task_name: Some(task_name.clone()),
@@ -389,10 +383,6 @@ pub(super) fn overlay_device(device: DeviceSummary) -> OverlayDevice {
     OverlayDevice {
         id: device.id,
         name: device.name,
-        model: device
-            .product_name
-            .or(device.model_name)
-            .unwrap_or_else(|| "unknown model".to_owned()),
         online: device.online,
         is_printing: device.is_printing,
         title: device.title.or(device.task_name.clone()),
@@ -679,7 +669,6 @@ mod tests {
                 {
                     "dev_id": "printer-a",
                     "dev_name": "Office X1",
-                    "dev_product_name": "X1 Carbon",
                     "dev_online": true,
                     "print": {
                         "subtask_name": "Calibration cube",
@@ -728,7 +717,6 @@ mod tests {
         let device = overlay_device(summaries.into_iter().next().unwrap());
 
         assert_eq!(device.name, "Office X1");
-        assert_eq!(device.model, "X1 Carbon");
         assert_eq!(device.title.as_deref(), Some("Calibration cube"));
         assert_eq!(device.task_source, TaskSource::PrinterStatusWithTaskHistory);
         assert_eq!(device.progress, Some(25.0));
