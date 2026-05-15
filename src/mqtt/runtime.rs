@@ -60,10 +60,6 @@ impl MqttRuntime {
         }
     }
 
-    pub(crate) async fn set_cloud_connected(&self, connected: bool) {
-        self.set_connection_connected("cloud", connected).await;
-    }
-
     pub(crate) async fn set_cloud_error(&self, error: impl Into<String>) {
         self.set_connection_error("cloud", error).await;
     }

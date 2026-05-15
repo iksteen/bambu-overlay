@@ -6,6 +6,7 @@ pub(crate) mod cloud;
 pub(crate) mod device_tls;
 pub(crate) mod devices;
 pub mod local;
+pub(crate) mod monitor;
 pub mod mqtt;
 pub mod overlay;
 pub mod video;

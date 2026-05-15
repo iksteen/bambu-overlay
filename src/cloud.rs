@@ -4,7 +4,7 @@ use tracing::{error, warn};
 use crate::{
     bambu::{BambuClient, CloudDevice},
     local::MqttEndpoint,
-    mqtt::{supervise_cloud, MqttRuntime},
+    mqtt::{supervise_target, MqttRuntime, MqttTarget},
 };
 
 #[derive(Clone)]
@@ -71,14 +71,13 @@ pub(crate) fn start_cloud_mqtt(runtime: MqttRuntime, startup: Option<CloudMqttSt
     };
 
     let mqtt_status = runtime.clone();
-    let supervisor = tokio::spawn(supervise_cloud(
-        runtime,
-        startup.endpoint.host,
-        startup.endpoint.port,
+    let target = MqttTarget::cloud(
+        startup.endpoint,
         startup.user_id,
         startup.access_token,
         startup.device_ids,
-    ));
+    );
+    let supervisor = tokio::spawn(supervise_target(runtime, target));
     tokio::spawn(async move {
         match supervisor.await {
             Ok(()) => {

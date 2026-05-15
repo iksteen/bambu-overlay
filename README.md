@@ -72,6 +72,8 @@ bambu-overlay serve --local-device 192.168.1.50
 bambu-overlay serve --local-device 192.168.1.50,12345678,Office --local-device 192.168.1.51,87654321,Garage
 bambu-overlay serve --video-device 192.168.1.50
 bambu-overlay serve --video-device 192.168.1.50 --video-device 192.168.1.51:6001
+bambu-overlay mqtt --device 00M123456789012
+bambu-overlay mqtt --local-device 192.168.1.50,12345678
 ```
 
 Configuration is handled with command-line options. Use `--help` on any command
@@ -80,6 +82,23 @@ the token file in cloud mode and only exposes runtime settings such as
 `--bind`, `--token-file`, `--timeout`, `--cloud-mqtt`,
 `--local-device`, `--cloud-device`, and `--video-device`.
 `--local-device`, `--cloud-device`, and `--video-device` can be repeated.
+
+## MQTT monitoring
+
+Use `mqtt` to print raw MQTT report payloads for one printer:
+
+```sh
+bambu-overlay mqtt
+bambu-overlay mqtt --device <DEVICE_ID>
+bambu-overlay mqtt --cloud-device <DEVICE_ID>
+bambu-overlay mqtt --local-device <HOST[:MQTT_PORT]>[,<ACCESS_CODE>[,<NAME>]]
+```
+
+The command uses the same cloud enumeration and local-device resolution rules as
+`serve`. If no `--device` is provided, it monitors the first resolved device;
+in cloud enumeration mode that is the first device returned by `/bind`. Only the
+selected printer's `device/<DEVICE_ID>/report` payloads are written to stdout,
+one event per line.
 
 ## Local devices
 

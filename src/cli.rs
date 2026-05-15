@@ -8,6 +8,7 @@ use crate::{
     bambu::{BambuClient, LoginResponse, API_BASE, MQTT_HOST},
     cloud::CloudSession,
     local::{Endpoint, LocalEndpointArg, MqttEndpoint},
+    monitor::{monitor_mqtt, MonitorConfig},
     video::VideoEndpoint,
     web::{serve, ServerConfig, DEFAULT_HOST, DEFAULT_PORT},
 };
@@ -25,6 +26,8 @@ enum Command {
     Login(LoginArgs),
     #[command(about = "List printers in the token account")]
     Devices(DevicesArgs),
+    #[command(about = "Monitor MQTT events for one printer")]
+    Mqtt(MqttArgs),
     #[command(about = "Serve an OBS browser overlay page")]
     Serve(ServeArgs),
 }
@@ -135,10 +138,55 @@ struct ServeArgs {
     video_devices: Vec<VideoEndpoint>,
 }
 
+#[derive(Args)]
+struct MqttArgs {
+    #[command(flatten)]
+    token: ServeTokenFileArgs,
+    #[arg(
+        long,
+        default_value_t = 30.0,
+        value_parser = positive_f64,
+        help = "Bambu Cloud API timeout in seconds",
+        help_heading = "Cloud"
+    )]
+    timeout: f64,
+    #[arg(
+        long = "cloud-mqtt",
+        value_name = "HOST[:PORT]",
+        default_value = MQTT_HOST,
+        help = "Bambu Cloud MQTT endpoint. Port defaults to 8883",
+        help_heading = "Cloud"
+    )]
+    cloud_mqtt: MqttEndpoint,
+    #[arg(
+        long = "cloud-device",
+        value_name = "DEVICE_ID",
+        value_parser = parse_cloud_device_id,
+        help = "Explicit Bambu Cloud MQTT device ID; repeat to add devices. When set, /bind enumeration is skipped",
+        help_heading = "Cloud"
+    )]
+    cloud_devices: Vec<String>,
+    #[arg(
+        long = "local-device",
+        value_name = "HOST[:PORT][,ACCESS_CODE[,NAME]]",
+        help = "Printer LAN MQTT device; repeat for multiple printers. Port defaults to 8883. The device ID is inferred from the MQTT certificate. ACCESS_CODE can be provided here or looked up from /bind when needed",
+        help_heading = "Local LAN"
+    )]
+    local_devices: Vec<LocalEndpointArg>,
+    #[arg(
+        long = "device",
+        value_name = "DEVICE_ID",
+        help = "Device ID to monitor. Defaults to the first resolved device",
+        help_heading = "Selection"
+    )]
+    device: Option<String>,
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login(args) => login(args).await,
         Command::Devices(args) => devices_cmd(args).await,
+        Command::Mqtt(args) => mqtt_cmd(args).await,
         Command::Serve(args) => serve_cmd(args).await,
     }
 }
@@ -209,6 +257,12 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
     serve(cloud, config).await
 }
 
+async fn mqtt_cmd(args: MqttArgs) -> Result<()> {
+    validate_devices(&args.cloud_devices)?;
+    let cloud = optional_token_client(args.token.token_file.clone(), args.timeout)?;
+    monitor_mqtt(cloud, MonitorConfig::from(&args)).await
+}
+
 fn validate_devices(cloud_devices: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
     for device_id in cloud_devices {
@@ -269,6 +323,17 @@ impl From<&ServeArgs> for ServerConfig {
             local_devices: args.local_devices.clone(),
             cloud_devices: args.cloud_devices.clone(),
             video_endpoints: args.video_devices.clone(),
+        }
+    }
+}
+
+impl From<&MqttArgs> for MonitorConfig {
+    fn from(args: &MqttArgs) -> Self {
+        Self {
+            cloud_mqtt: args.cloud_mqtt.clone(),
+            local_devices: args.local_devices.clone(),
+            cloud_devices: args.cloud_devices.clone(),
+            device: args.device.clone(),
         }
     }
 }

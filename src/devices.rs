@@ -62,7 +62,7 @@ pub(crate) struct ResolvedDevices {
     pub(crate) catalog: Vec<KnownDevice>,
     pub(crate) local: Vec<LocalDevice>,
     pub(crate) cloud_mqtt_ids: Vec<String>,
-    explicit_video: Vec<(String, VideoEndpoint)>,
+    pub(crate) explicit_video: Vec<(String, VideoEndpoint)>,
 }
 
 pub(crate) struct ResolvedVideoEndpoints {
